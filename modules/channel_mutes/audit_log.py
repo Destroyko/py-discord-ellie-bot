@@ -37,6 +37,8 @@ class AuditLog:
         channel: discord.abc.GuildChannel | None,
         target: discord.Member | discord.User | None,
         moderator: discord.Member | None = None,
+        previous_duration_text: str | None = None,
+        previous_expire_at: datetime | None = None,
         expire_at: datetime | None = None,
         duration_text: str | None = None,
         reason: str | None = None,
@@ -53,6 +55,7 @@ class AuditLog:
         ch = channel
         ch_id = channel_id or (ch.id if ch else 0)
         ch_name = ch.name if isinstance(ch, discord.TextChannel) else str(ch_id)
+        channel_display = f"<#{ch_id}>" if ch_id else f"**#{ch_name}**"
 
         uid = target_user_id or (target.id if target else 0)
         user_mention = f"<@{uid}>"
@@ -62,23 +65,32 @@ class AuditLog:
             actor = guild.me.display_name if guild.me else "Бот"
             line = (
                 f"**{actor}** снял запрет пользователю {user_mention} "
-                f"общаться в чате **#{ch_name}** (истёк срок)"
+                f"общаться в чате {channel_display} (истёк срок)"
             )
         else:
             mod_mention = f"<@{mod_id}>"
             if action == AuditAction.MUTED:
                 verb = "запретил"
             elif action == AuditAction.EXTENDED:
-                verb = "продлил запрет"
+                verb = "обновил запрет"
             else:
                 verb = "снял запрет"
             line = (
                 f"{mod_mention} **{verb}** пользователю {user_mention} "
-                f"общаться в чате **#{ch_name}**"
+                f"общаться в чате {channel_display}"
             )
 
         extra_parts: list[str] = []
-        if action in (AuditAction.MUTED, AuditAction.EXTENDED):
+        if action == AuditAction.EXTENDED:
+            if previous_duration_text:
+                extra_parts.append(f"Было: {previous_duration_text}")
+            elif previous_expire_at:
+                extra_parts.append(f"Было: до {previous_expire_at.strftime('%Y-%m-%d %H:%M UTC')}")
+            if duration_text:
+                extra_parts.append(f"Стало: {duration_text}")
+            elif expire_at:
+                extra_parts.append(f"Стало: до {expire_at.strftime('%Y-%m-%d %H:%M UTC')}")
+        elif action == AuditAction.MUTED:
             if duration_text:
                 extra_parts.append(f"Срок: {duration_text}")
             elif expire_at:
@@ -86,19 +98,38 @@ class AuditLog:
         if reason and action in (AuditAction.MUTED, AuditAction.EXTENDED):
             extra_parts.append(f"Причина: {reason}")
         if action == AuditAction.EXTENDED:
-            extra_parts.append("Продлено")
+            extra_parts.append("Обновлено")
 
-        ids_line = (
-            f"IDs: user={uid}, channel={ch_id}, moderator={mod_id}"
-        )
+        ids_lines = [
+            f"Пользователь: {uid}",
+            f"Чат: {ch_id}",
+        ]
+        if action != AuditAction.AUTO_UNMUTED:
+            ids_lines.append(f"Модератор: {mod_id}")
         body = line
         if extra_parts:
             body += "\n" + "\n".join(extra_parts)
-        body += f"\n{ids_line}"
+        body += "\n" + "\n".join(ids_lines)
+
+        if action == AuditAction.MUTED:
+            embed_color = discord.Color.red()
+            title = "Наказание"
+        elif action == AuditAction.EXTENDED:
+            embed_color = discord.Color.yellow()
+            title = "Обновление наказания"
+        else:
+            embed_color = discord.Color.green()
+            title = "Снятие наказания"
+
+        embed = discord.Embed(
+            # title=title,
+            description=body,
+            color=embed_color,
+        )
 
         try:
             await logs_channel.send(
-                body,
+                embed=embed,
                 allowed_mentions=discord.AllowedMentions(users=False),
             )
         except discord.HTTPException:

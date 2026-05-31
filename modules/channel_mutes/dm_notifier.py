@@ -9,9 +9,16 @@ import discord
 
 logger = logging.getLogger("ellie_bot")
 
+SERVER_NAME = "Оплот работяг"
+RULES_URL = "https://discord.com/channels/633759687845740545/634384447713705984"
+
 
 def _format_expire(expire_at: datetime) -> str:
     return expire_at.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _channel_link(guild_id: int, channel_id: int, channel_name: str) -> str:
+    return f"[#{channel_name}](https://discord.com/channels/{guild_id}/{channel_id})"
 
 
 class DmNotifier:
@@ -22,40 +29,73 @@ class DmNotifier:
         target: discord.Member,
         *,
         guild_name: str,
+        guild_id: int,
         channel_name: str,
+        channel_id: int,
         expire_at: datetime,
         duration_text: str | None,
         reason: str | None = None,
+        is_extended: bool = False,
     ) -> None:
         """Notify user of new or extended mute."""
         reason_text = reason if reason else "не указана"
         duration_display = duration_text or f"до {_format_expire(expire_at)}"
-        text = (
-            f"Сервер: {guild_name}\n"
-            f"Канал: #{channel_name}\n"
-            f"Срок: {duration_display}\n"
-            f"Причина: {reason_text}"
+        channel_display = _channel_link(guild_id, channel_id, channel_name)
+        action_text = "Вам обновили время запрета" if is_extended else "Вы получили запрет"
+        title = "Продление наказания" if is_extended else "Наказание"
+        color = discord.Color.yellow() if is_extended else discord.Color.red()
+
+        description = (
+            f'{action_text} на общение в чате {channel_display} '
+            f'на сервере "{SERVER_NAME}" продолжительность {duration_display}\n\n'
+            "**Причина**\n"
+            f"{reason_text}\n\n"
+            f"[Правила сервера]({RULES_URL})\n"
+            "-# Для обжалования вы можете обратиться к старшим модераторам или "
+            "супермодераторам, перед обращением рекомендуем ознакомиться с "
+            "разделом правил сервера"
         )
-        await self._safe_send(target, text)
+        embed = discord.Embed(
+            # title=title,
+            description=description,
+            color=color,
+        )
+        await self._safe_send(target, embed=embed)
 
     async def send_unmute(
         self,
         target: discord.Member,
         *,
         guild_name: str,
+        guild_id: int,
         channel_name: str,
+        channel_id: int,
     ) -> None:
         """Notify user that channel mute was removed."""
-        text = (
-            f"Сервер: {guild_name}\n"
-            f"Канал: #{channel_name}\n"
-            "С вас снято ограничение на отправку сообщений в этом канале."
+        channel_display = _channel_link(guild_id, channel_id, channel_name)
+        description = (
+            f'С вас снят запрет общаться в чате {channel_display} '
+            f'на сервере "{SERVER_NAME}".\n\n'
+            f"[Правила сервера]({RULES_URL})"
         )
-        await self._safe_send(target, text)
+        embed = discord.Embed(
+            # title="Снятие наказания",
+            description=description,
+            color=discord.Color.green(),
+        )
+        await self._safe_send(target, embed=embed)
 
-    async def _safe_send(self, target: discord.Member, content: str) -> None:
+    async def _safe_send(
+        self,
+        target: discord.Member,
+        *,
+        embed: discord.Embed,
+    ) -> None:
         try:
-            await target.send(content)
+            await target.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         except discord.Forbidden:
             logger.warning("Cannot DM user %s (DM closed or blocked)", target.id)
         except discord.HTTPException:

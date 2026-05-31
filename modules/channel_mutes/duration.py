@@ -62,3 +62,13 @@ def compute_expire_at(duration: timedelta, *, now: datetime | None = None) -> da
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
     return base + duration
+
+
+def format_duration(delta: timedelta) -> str:
+    """Format a duration as the closest supported slash-command value."""
+    total_minutes = max(1, round(delta.total_seconds() / 60))
+    if total_minutes % (24 * 60) == 0:
+        return f"{total_minutes // (24 * 60)}d"
+    if total_minutes % 60 == 0:
+        return f"{total_minutes // 60}h"
+    return f"{total_minutes}m"

@@ -15,7 +15,7 @@ from core.exceptions import DiscordActionError, ValidationError
 from database.models import ChannelMute
 from modules.channel_mutes.audit_log import AuditAction, AuditLog
 from modules.channel_mutes.dm_notifier import DmNotifier
-from modules.channel_mutes.duration import compute_expire_at
+from modules.channel_mutes.duration import compute_expire_at, format_duration
 from modules.channel_mutes.moderator_notifier import ModeratorNotifier
 from modules.channel_mutes.overwrite_manager import OverwriteManager
 from modules.channel_mutes.permissions_bits import SEND_MESSAGES_BIT
@@ -121,6 +121,7 @@ class ChannelMuteService:
 
         try:
             saved = self._repo.insert(mute)
+            assert saved.id is not None
             if self._on_scheduled:
                 await self._on_scheduled(saved.id, saved.expire_at)
         except Exception:
@@ -130,13 +131,16 @@ class ChannelMuteService:
         await self._dm.send_mute_issued(
             target,
             guild_name=guild.name,
+            guild_id=guild.id,
             channel_name=channel.name,
+            channel_id=channel.id,
             expire_at=expire_at,
             duration_text=duration_text,
             reason=reason,
         )
         await self._moderator_notifier.send_mute_notice(
             guild,
+            moderator=moderator,
             target=target,
             channel=channel,
             duration_text=duration_text,
@@ -178,25 +182,35 @@ class ChannelMuteService:
         if updated is None:
             raise ValidationError("Не удалось обновить наказание.")
 
+        assert updated.id is not None
+
         if self._on_cancelled:
             await self._on_cancelled(existing.id)
         if self._on_scheduled:
             await self._on_scheduled(updated.id, updated.expire_at)
 
+        previous_duration_text = format_duration(existing.expire_at - existing.created_at)
+
         await self._dm.send_mute_issued(
             target,
             guild_name=guild.name,
+            guild_id=guild.id,
             channel_name=channel.name,
+            channel_id=channel.id,
             expire_at=expire_at,
             duration_text=duration_text,
             reason=reason,
+            is_extended=True,
         )
         await self._moderator_notifier.send_mute_notice(
             guild,
+            moderator=moderator,
             target=target,
             channel=channel,
             duration_text=duration_text,
             reason=reason,
+            previous_duration_text=previous_duration_text,
+            is_extended=True,
         )
         await self._audit.log_action(
             AuditAction.EXTENDED,
@@ -204,6 +218,8 @@ class ChannelMuteService:
             channel=channel,
             target=target,
             moderator=moderator,
+            previous_duration_text=previous_duration_text,
+            previous_expire_at=existing.expire_at,
             expire_at=expire_at,
             duration_text=duration_text,
             reason=reason,
@@ -260,7 +276,9 @@ class ChannelMuteService:
             await self._dm.send_unmute(
                 target,
                 guild_name=guild.name,
+                guild_id=guild.id,
                 channel_name=channel.name,
+                channel_id=channel.id,
             )
             await self._audit.log_action(
                 AuditAction.UNMUTED,

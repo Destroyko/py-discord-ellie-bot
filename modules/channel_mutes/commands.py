@@ -1,4 +1,4 @@
-"""Slash commands for channel mutes."""
+﻿"""Slash commands for channel mutes."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from discord.ext import commands
 
 from core.channel_context import (
     assert_commands_allowed_in_channel,
+    is_ephemeral_reply,
     resolve_invocation_channel,
     resolve_target_channel,
 )
@@ -39,7 +40,7 @@ logger = logging.getLogger("ellie_bot")
 
 
 class ChannelMutesCog(commands.Cog):
-    """Slash commands: mute_channel, unmute_channel, active_mutes, mute_help."""
+    """Slash commands: mute_user, unmute_user, active_mutes, mute_help."""
 
     def __init__(
         self,
@@ -65,7 +66,7 @@ class ChannelMutesCog(commands.Cog):
             inv = resolve_invocation_channel(interaction, self.config)
             await reply_validation(
                 interaction,
-                "У вас нет прав для этой команды.",
+                "РЈ РІР°СЃ РЅРµС‚ РїСЂР°РІ РґР»СЏ СЌС‚РѕР№ РєРѕРјР°РЅРґС‹.",
                 config=self.config,
                 invocation_kind=inv.kind,
             )
@@ -74,16 +75,16 @@ class ChannelMutesCog(commands.Cog):
         return interaction.guild, interaction.user
 
     @app_commands.command(
-        name="mute_channel",
-        description="Временно запретить пользователю писать в канале",
+        name="mute_user",
+        description="Р’СЂРµРјРµРЅРЅРѕ Р·Р°РїСЂРµС‚РёС‚СЊ РїРѕР»СЊР·РѕРІР°С‚РµР»СЋ РїРёСЃР°С‚СЊ РІ РєР°РЅР°Р»Рµ",
     )
     @app_commands.describe(
-        user="Пользователь",
-        duration="Длительность (10m, 2h, 3d)",
-        reason="Причина",
-        channel="Целевой канал (обязателен в бот-командах)",
+        user="РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ",
+        duration="Р”Р»РёС‚РµР»СЊРЅРѕСЃС‚СЊ (10m, 2h, 3d)",
+        reason="РџСЂРёС‡РёРЅР°",
+        channel="Р¦РµР»РµРІРѕР№ РєР°РЅР°Р» (РѕР±СЏР·Р°С‚РµР»РµРЅ РІ Р±РѕС‚-РєРѕРјР°РЅРґР°С…)",
     )
-    async def mute_channel(
+    async def mute_user(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
@@ -111,11 +112,11 @@ class ChannelMutesCog(commands.Cog):
 
             allowed, msg = can_mute_target(moderator, target_member, self.config)
             if not allowed:
-                raise TargetNotAllowedError(msg or "Нельзя применить наказание к этому участнику.")
+                raise TargetNotAllowedError(msg or "РќРµР»СЊР·СЏ РїСЂРёРјРµРЅРёС‚СЊ РЅР°РєР°Р·Р°РЅРёРµ Рє СЌС‚РѕРјСѓ СѓС‡Р°СЃС‚РЅРёРєСѓ.")
 
             ok, bot_msg = bot_can_moderate_member(guild, target_member)
             if not ok:
-                raise PermissionDeniedError(bot_msg or "Не могу выдать наказание.")
+                raise PermissionDeniedError(bot_msg or "РќРµ РјРѕРіСѓ РІС‹РґР°С‚СЊ РЅР°РєР°Р·Р°РЅРёРµ.")
 
             delta = parse_duration(duration)
             duration_text = duration.strip()
@@ -130,13 +131,13 @@ class ChannelMutesCog(commands.Cog):
             )
             if extended:
                 text = (
-                    f"Наказание продлено: {target_member.mention}, "
-                    f"канал {target_channel.mention}, срок {duration_text}"
+                    f"Наказание обновлено: {target_member.mention}, "
+                    f"РєР°РЅР°Р» {target_channel.mention}, СЃСЂРѕРє {duration_text}"
                 )
             else:
                 text = (
-                    f"Наказание выдано: {target_member.mention}, "
-                    f"канал {target_channel.mention}, срок {duration_text}"
+                    f"РќР°РєР°Р·Р°РЅРёРµ РІС‹РґР°РЅРѕ: {target_member.mention}, "
+                    f"РєР°РЅР°Р» {target_channel.mention}, СЃСЂРѕРє {duration_text}"
                 )
             await reply_moderator(
                 interaction,
@@ -171,14 +172,14 @@ class ChannelMutesCog(commands.Cog):
                 )
 
     @app_commands.command(
-        name="unmute_channel",
-        description="Снять запрет на отправку сообщений в канале",
+        name="unmute_user",
+        description="РЎРЅСЏС‚СЊ Р·Р°РїСЂРµС‚ РЅР° РѕС‚РїСЂР°РІРєСѓ СЃРѕРѕР±С‰РµРЅРёР№ РІ РєР°РЅР°Р»Рµ",
     )
     @app_commands.describe(
-        user="Пользователь",
-        channel="Канал (обязателен в бот-командах)",
+        user="РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ",
+        channel="РљР°РЅР°Р» (РѕР±СЏР·Р°С‚РµР»РµРЅ РІ Р±РѕС‚-РєРѕРјР°РЅРґР°С…)",
     )
-    async def unmute_channel(
+    async def unmute_user(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
@@ -206,7 +207,7 @@ class ChannelMutesCog(commands.Cog):
             )
             if existing is None:
                 raise ValidationError(
-                    f"Пользователь не ограничен в общении в канале #{target_channel.name}."
+                    f"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РѕРіСЂР°РЅРёС‡РµРЅ РІ РѕР±С‰РµРЅРёРё РІ РєР°РЅР°Р»Рµ #{target_channel.name}."
                 )
 
             removed = await self.service.unmute_channel(
@@ -217,16 +218,23 @@ class ChannelMutesCog(commands.Cog):
             )
             if not removed:
                 raise ValidationError(
-                    f"Пользователь не ограничен в общении в канале #{target_channel.name}."
+                    f"РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РЅРµ РѕРіСЂР°РЅРёС‡РµРЅ РІ РѕР±С‰РµРЅРёРё РІ РєР°РЅР°Р»Рµ #{target_channel.name}."
                 )
 
-            await reply_moderator(
-                interaction,
-                f"Запрет снят: {target_member.mention}, канал {target_channel.mention}",
-                config=self.config,
-                invocation_kind=invocation.kind,
-                success=True,
+            embed = discord.Embed(
+                description=(
+                    f"Запрет снят: {target_member.mention}, "
+                    f"канал {target_channel.mention}"
+                ),
+                color=discord.Color.green(),
             )
+            avatar = moderator.avatar or moderator.default_avatar
+            embed.set_author(name=moderator.name, icon_url=avatar.url)
+            ephemeral = is_ephemeral_reply(invocation.kind)
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=ephemeral)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=ephemeral)
         except ValidationError as exc:
             if inv_kind is not None:
                 await reply_validation(
@@ -240,11 +248,11 @@ class ChannelMutesCog(commands.Cog):
 
     @app_commands.command(
         name="active_mutes",
-        description="Список активных ограничений пользователя по каналам",
+        description="РЎРїРёСЃРѕРє Р°РєС‚РёРІРЅС‹С… РѕРіСЂР°РЅРёС‡РµРЅРёР№ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РїРѕ РєР°РЅР°Р»Р°Рј",
     )
     @app_commands.describe(
-        user="Пользователь",
-        user_id="ID пользователя (если не выбран user)",
+        user="РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ",
+        user_id="ID РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ (РµСЃР»Рё РЅРµ РІС‹Р±СЂР°РЅ user)",
     )
     async def active_mutes(
         self,
@@ -272,22 +280,22 @@ class ChannelMutesCog(commands.Cog):
             elif user_id is not None:
                 target_member = await resolve_user(guild, user_id)
             else:
-                raise ValidationError("Укажите пользователя или user_id.")
+                raise ValidationError("РЈРєР°Р¶РёС‚Рµ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РёР»Рё user_id.")
 
             mutes = self.repository.list_active_for_user(guild.id, target_member.id)
 
             if not mutes:
-                text = "У пользователя нет активных ограничений в каналах."
+                text = "РЈ РїРѕР»СЊР·РѕРІР°С‚РµР»СЏ РЅРµС‚ Р°РєС‚РёРІРЅС‹С… РѕРіСЂР°РЅРёС‡РµРЅРёР№ РІ РєР°РЅР°Р»Р°С…."
             else:
                 lines = [
-                    f"Активные ограничения для {target_member.mention} (`{target_member.id}`):"
+                    f"РђРєС‚РёРІРЅС‹Рµ РѕРіСЂР°РЅРёС‡РµРЅРёСЏ РґР»СЏ {target_member.mention} (`{target_member.id}`):"
                 ]
                 for mute in mutes:
                     ch = guild.get_channel(mute.channel_id)
                     ch_name = ch.name if isinstance(ch, discord.TextChannel) else str(mute.channel_id)
                     exp = mute.expire_at.strftime("%Y-%m-%d %H:%M UTC")
-                    reason = mute.reason or "—"
-                    lines.append(f"• #{ch_name} — до {exp}, причина: {reason}")
+                    reason = mute.reason or "вЂ”"
+                    lines.append(f"вЂў #{ch_name} вЂ” РґРѕ {exp}, РїСЂРёС‡РёРЅР°: {reason}")
                 text = "\n".join(lines)
 
             await reply_moderator(
@@ -310,7 +318,7 @@ class ChannelMutesCog(commands.Cog):
 
     @app_commands.command(
         name="mute_help",
-        description="Справка по командам ограничений в каналах",
+        description="РЎРїСЂР°РІРєР° РїРѕ РєРѕРјР°РЅРґР°Рј РѕРіСЂР°РЅРёС‡РµРЅРёР№ РІ РєР°РЅР°Р»Р°С…",
     )
     async def mute_help(self, interaction: discord.Interaction) -> None:
         inv_kind = None

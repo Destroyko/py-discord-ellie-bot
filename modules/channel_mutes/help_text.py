@@ -6,13 +6,13 @@ HELP_MESSAGE = """**Модуль ограничений в каналах**
 
 **Команды**
 
-• `/mute_channel` — в канале наказания **или** в бот-командах с `channel`
-  Пример в канале: `/mute_channel user:@User duration:2h reason:спам`
-  Пример в бот-командах: `/mute_channel user:@User duration:1d channel:#общий`
+• `/mute_user` — в канале наказания **или** в бот-командах с `channel`
+  Пример в канале: `/mute_user user:@User duration:2h reason:спам`
+  Пример в бот-командах: `/mute_user user:@User duration:1d channel:#общий`
 
-• `/unmute_channel` — в канале снятия **или** в бот-командах с `channel`
-  Пример: `/unmute_channel user:@User`
-  В бот-командах: `/unmute_channel user:@User channel:#общий`
+• `/unmute_user` — в канале снятия **или** в бот-командах с `channel`
+  Пример: `/unmute_user user:@User`
+  В бот-командах: `/unmute_user user:@User channel:#общий`
 
 • `/active_mutes` — **только бот-команды**, параметр `user`
   Пример: `/active_mutes user:123456789012345678`
