@@ -1,0 +1,11 @@
+.env
+config/config.yaml
+config/roles.yaml
+__pycache__/
+*.py[cod]
+*.db
+/logs/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/

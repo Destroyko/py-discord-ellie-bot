@@ -1,0 +1,6 @@
+guild_id: 0
+database_path: data/bot.db
+log_level: INFO
+prefix: "!"
+moderator_commands_channel_id: 0
+bot_logs_channel_id: 0
