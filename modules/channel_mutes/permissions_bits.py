@@ -57,3 +57,32 @@ def has_our_send_messages_deny(overwrite: discord.PermissionOverwrite | None) ->
         return False
     _allow, deny = overwrite.pair()
     return bool(deny.value & SEND_MESSAGES_BIT)
+
+
+def compute_reverted_send_messages_pair(
+    allow: discord.Permissions,
+    deny: discord.Permissions,
+    snapshot: dict[str, Any] | None,
+) -> tuple[discord.Permissions, discord.Permissions]:
+    """
+    Remove bot send_messages deny and restore prior send_messages state from snapshot.
+
+    Shared by revert_mute (Member) and revert_mute_by_user_id (left guild).
+    """
+    new_deny_value = deny.value & ~SEND_MESSAGES_BIT
+    prior = None if snapshot is None else snapshot.get(SNAPSHOT_KEY_SEND_MESSAGES)
+
+    if prior is True:
+        new_allow_value = allow.value | SEND_MESSAGES_BIT
+        new_deny_value = new_deny_value & ~SEND_MESSAGES_BIT
+    elif prior is False:
+        new_allow_value = allow.value & ~SEND_MESSAGES_BIT
+        new_deny_value = new_deny_value | SEND_MESSAGES_BIT
+    else:
+        new_allow_value = allow.value & ~SEND_MESSAGES_BIT
+        new_deny_value = new_deny_value & ~SEND_MESSAGES_BIT
+
+    return (
+        discord.Permissions(new_allow_value),
+        discord.Permissions(new_deny_value),
+    )

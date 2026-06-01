@@ -38,7 +38,7 @@ class ModeratorNotifier:
             )
             return
 
-        reason_text = reason if reason else "РЅРµ СѓРєР°Р·Р°РЅРѕ"
+        reason_text = reason if reason else "не указано"
         if is_extended:
             duration_line = (
                 f"с {previous_duration_text} на {duration_text}"
@@ -58,10 +58,10 @@ class ModeratorNotifier:
                 f"{reason_text}"
             )
 
-        title = "РќР°РєР°Р·Р°РЅРёРµ"
+        title = "Наказание"
         color = discord.Color.red()
         if is_extended:
-            title = "РћР±РЅРѕРІР»РµРЅРёРµ РЅР°РєР°Р·Р°РЅРёСЏ"
+            title = "Обновление наказания"
             color = discord.Color.yellow()
 
         embed = discord.Embed(

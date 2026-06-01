@@ -77,6 +77,7 @@ async def reply_validation(
     *,
     config: AppConfig,
     invocation_kind: ChannelKind,
+    ephemeral: bool | None = None,
 ) -> None:
     """Send a validation error to the moderator."""
     await reply_moderator(
@@ -85,6 +86,7 @@ async def reply_validation(
         config=config,
         invocation_kind=invocation_kind,
         success=False,
+        ephemeral=ephemeral,
     )
 
 
@@ -94,6 +96,7 @@ async def reply_internal_error(
     *,
     config: AppConfig,
     invocation_kind: ChannelKind,
+    ephemeral: bool | None = None,
 ) -> None:
     """Log traceback and notify moderator generically."""
     logger.exception("Command failed: %s", exc)
@@ -104,4 +107,5 @@ async def reply_internal_error(
         config=config,
         invocation_kind=invocation_kind,
         success=False,
+        ephemeral=ephemeral,
     )

@@ -15,7 +15,7 @@ HELP_MESSAGE = """**Модуль ограничений в каналах**
   В бот-командах: `/unmute_user user:@User channel:#общий`
 
 • `/active_mutes` — **только бот-команды**, параметр `user`
-  Пример: `/active_mutes user:123456789012345678`
+  Пример: `/active_mutes user:@User`
 
 • `/mute_help` — **только бот-команды**
 

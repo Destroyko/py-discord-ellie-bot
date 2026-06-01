@@ -35,6 +35,7 @@ class EllieBot(commands.Bot):
         self.mute_service = ChannelMuteService(self, config, self.mute_repository)
         self.mute_scheduler = MuteScheduler(self.mute_service, self.mute_repository)
         self._scheduler_wired = False
+        self._mutes_restored = False
 
     def _wire_scheduler(self) -> None:
         if self._scheduler_wired:
@@ -75,15 +76,21 @@ class EllieBot(commands.Bot):
 
         guild = self.get_guild(self.app_config.guild_id)
         if guild is None:
-            logger.error(
-                "Configured guild_id=%s not found. Invite the bot or fix config.",
-                self.app_config.guild_id,
-            )
-            return
+            try:
+                guild = await self.fetch_guild(self.app_config.guild_id)
+            except discord.HTTPException:
+                logger.error(
+                    "Configured guild_id=%s not found. Invite the bot or fix config.",
+                    self.app_config.guild_id,
+                )
+                return
 
         logger.info("Connected to target guild: %s (%s)", guild.name, guild.id)
-        await self.mute_scheduler.restore_all(self.app_config.guild_id)
-        logger.info("Mute scheduler restored for guild %s", guild.id)
+
+        if not self._mutes_restored:
+            await self.mute_scheduler.restore_all(self.app_config.guild_id)
+            self._mutes_restored = True
+            logger.info("Mute scheduler restored for guild %s", guild.id)
 
 
 async def main() -> None:

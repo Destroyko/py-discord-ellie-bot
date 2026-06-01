@@ -20,6 +20,8 @@ from modules.channel_mutes.moderator_notifier import ModeratorNotifier
 from modules.channel_mutes.overwrite_manager import OverwriteManager
 from modules.channel_mutes.permissions_bits import SEND_MESSAGES_BIT
 from modules.channel_mutes.repository import ChannelMuteRepository
+from modules.channel_mutes.unmute_outcome import UnmuteOutcome
+from modules.channel_mutes.user_presence import UserPresence, resolve_user_presence
 
 logger = logging.getLogger("ellie_bot")
 
@@ -251,6 +253,15 @@ class ChannelMuteService:
             self._repo.delete(existing.id)
             if self._on_cancelled and existing.id:
                 await self._on_cancelled(existing.id)
+            if source == UnmuteSource.AUTO:
+                await self._audit.log_action(
+                    AuditAction.AUTO_UNMUTED,
+                    guild=guild,
+                    channel=channel,
+                    target=target,
+                    target_user_id=target.id,
+                    channel_id=channel.id,
+                )
             return source == UnmuteSource.MANUAL
 
         snapshot = existing.overwrite_snapshot
@@ -304,53 +315,202 @@ class ChannelMuteService:
         mute_id: int,
         *,
         source: UnmuteSource = UnmuteSource.AUTO,
-    ) -> None:
+    ) -> UnmuteOutcome:
         """Unmute using database record (scheduler / startup)."""
         record = self._repo.get_by_id(mute_id)
         if record is None:
-            return
+            return UnmuteOutcome.RECORD_GONE
 
-        guild = self._bot.get_guild(record.guild_id)
+        guild = await self._resolve_guild(record.guild_id)
         if guild is None:
-            self._repo.delete(mute_id)
-            return
+            return UnmuteOutcome.RETRY
 
-        channel = guild.get_channel(record.channel_id)
-        if not isinstance(channel, discord.TextChannel):
-            self._repo.delete(mute_id)
+        channel = await self._resolve_text_channel(guild, record.channel_id)
+        if channel is None:
+            return await self._finalize_channel_unavailable(record, guild)
+
+        presence, member = await resolve_user_presence(self._bot, guild, record.user_id)
+
+        if presence == UserPresence.DELETED:
+            return await self._cleanup_deleted_user(record, channel)
+
+        now = datetime.now(timezone.utc)
+        if presence == UserPresence.LEFT_GUILD:
+            if now < record.expire_at:
+                return UnmuteOutcome.NOT_YET_EXPIRED
+            return await self._finalize_auto_unmute(record, guild, channel, member=None)
+
+        assert member is not None
+        try:
+            await self.unmute_channel(
+                guild=guild,
+                channel=channel,
+                target=member,
+                moderator=None,
+                source=source,
+            )
+        except (DiscordActionError, discord.HTTPException):
+            logger.exception("Auto-unmute failed for mute %s (member on guild)", mute_id)
+            return UnmuteOutcome.RETRY
+
+        if self._repo.get_by_id(mute_id) is None:
+            return UnmuteOutcome.COMPLETED
+        return UnmuteOutcome.RETRY
+
+    async def _resolve_guild(self, guild_id: int) -> discord.Guild | None:
+        guild = self._bot.get_guild(guild_id)
+        if guild is not None:
+            return guild
+        try:
+            fetched = await self._bot.fetch_guild(guild_id)
+            return fetched
+        except discord.HTTPException:
+            logger.warning("Could not fetch guild %s for auto-unmute", guild_id)
+            return None
+
+    async def _resolve_text_channel(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+    ) -> discord.TextChannel | None:
+        channel = guild.get_channel(channel_id)
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        try:
+            fetched = await guild.fetch_channel(channel_id)
+        except discord.HTTPException:
+            logger.warning(
+                "Could not fetch channel %s in guild %s for auto-unmute",
+                channel_id,
+                guild.id,
+            )
+            return None
+        if isinstance(fetched, discord.TextChannel):
+            return fetched
+        return None
+
+    async def _finalize_channel_unavailable(
+        self,
+        record: ChannelMute,
+        guild: discord.Guild,
+    ) -> UnmuteOutcome:
+        """Channel deleted or not text — drop DB record; overwrite not reachable."""
+        assert record.id is not None
+        self._repo.delete(record.id)
+        if self._on_cancelled:
+            await self._on_cancelled(record.id)
+        await self._audit.log_action(
+            AuditAction.AUTO_UNMUTED,
+            guild=guild,
+            channel=None,
+            target=None,
+            target_user_id=record.user_id,
+            channel_id=record.channel_id,
+        )
+        return UnmuteOutcome.COMPLETED
+
+    async def _finalize_auto_unmute(
+        self,
+        record: ChannelMute,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        *,
+        member: discord.Member | None,
+    ) -> UnmuteOutcome:
+        """Revert overwrite and remove DB row (member on guild or left)."""
+        assert record.id is not None
+        user_id = record.user_id
+        lookup: discord.Member | discord.Object = (
+            member if member is not None else discord.Object(id=user_id)
+        )
+        overwrite = channel.overwrites_for(lookup)
+        snapshot = record.overwrite_snapshot
+
+        if not self._has_send_deny(overwrite):
+            self._repo.delete(record.id)
+            if self._on_cancelled:
+                await self._on_cancelled(record.id)
             await self._audit.log_action(
                 AuditAction.AUTO_UNMUTED,
                 guild=guild,
-                channel=None,
-                target=None,
-                target_user_id=record.user_id,
-                channel_id=record.channel_id,
+                channel=channel,
+                target=member,
+                target_user_id=user_id,
+                channel_id=channel.id,
             )
-            return
+            return UnmuteOutcome.COMPLETED
 
-        member = guild.get_member(record.user_id)
-        if member is None:
-            try:
-                member = await guild.fetch_member(record.user_id)
-            except discord.NotFound:
-                self._repo.delete(mute_id)
-                await self._audit.log_action(
-                    AuditAction.AUTO_UNMUTED,
-                    guild=guild,
-                    channel=channel,
-                    target=None,
-                    target_user_id=record.user_id,
-                    channel_id=record.channel_id,
+        try:
+            if member is not None:
+                await self._overwrite.revert_mute(channel, member, snapshot)
+            else:
+                await self._overwrite.revert_mute_by_user_id(
+                    channel, user_id, snapshot, member=None
                 )
-                return
+        except discord.HTTPException:
+            logger.exception(
+                "Failed to revert overwrite for mute %s user %s channel %s",
+                record.id,
+                user_id,
+                channel.id,
+            )
+            return UnmuteOutcome.RETRY
 
-        await self.unmute_channel(
+        try:
+            self._repo.delete(record.id)
+            if self._on_cancelled:
+                await self._on_cancelled(record.id)
+        except Exception:
+            logger.exception("DB delete failed after Discord revert for mute %s", record.id)
+            if member is not None:
+                try:
+                    await self._overwrite.apply_mute(channel, member)
+                except discord.HTTPException:
+                    logger.exception("Failed to re-apply mute after DB failure")
+            return UnmuteOutcome.RETRY
+
+        await self._audit.log_action(
+            AuditAction.AUTO_UNMUTED,
             guild=guild,
             channel=channel,
             target=member,
-            moderator=None,
-            source=source,
+            target_user_id=user_id,
+            channel_id=channel.id,
         )
+        return UnmuteOutcome.COMPLETED
+
+    async def _cleanup_deleted_user(
+        self,
+        record: ChannelMute,
+        channel: discord.TextChannel,
+    ) -> UnmuteOutcome:
+        """Remove DB row for deleted account; best-effort revert without audit."""
+        assert record.id is not None
+        overwrite = channel.overwrites_for(discord.Object(id=record.user_id))
+        if self._has_send_deny(overwrite):
+            try:
+                await self._overwrite.revert_mute_by_user_id(
+                    channel,
+                    record.user_id,
+                    record.overwrite_snapshot,
+                    member=None,
+                )
+            except discord.HTTPException:
+                logger.warning(
+                    "Best-effort revert for deleted user %s in channel %s failed",
+                    record.user_id,
+                    channel.id,
+                )
+
+        self._repo.delete(record.id)
+        if self._on_cancelled:
+            await self._on_cancelled(record.id)
+        logger.info(
+            "Removed mute record %s for deleted user %s",
+            record.id,
+            record.user_id,
+        )
+        return UnmuteOutcome.DELETED_USER
 
     @staticmethod
     def _has_send_deny(overwrite: discord.PermissionOverwrite) -> bool:

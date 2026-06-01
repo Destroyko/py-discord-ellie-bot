@@ -110,3 +110,13 @@ def resolve_target_channel(
 def is_ephemeral_reply(invocation_kind: ChannelKind) -> bool:
     """Whether bot replies to the moderator should be ephemeral."""
     return invocation_kind == ChannelKind.PUBLIC
+
+
+def is_ephemeral_mute_command_reply(invocation_kind: ChannelKind) -> bool:
+    """
+    Ephemeral slash ack for /mute_user.
+
+    In public channels the audit log is the shared record; in mod-commands
+    ModeratorNotifier posts the visible notice — the slash reply is private.
+    """
+    return invocation_kind in (ChannelKind.PUBLIC, ChannelKind.MOD_COMMANDS)

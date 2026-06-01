@@ -6,11 +6,13 @@ import logging
 from typing import Any
 
 import discord
+from discord.abc import _Overwrites
 
 from modules.channel_mutes.permissions_bits import (
     SEND_MESSAGES_BIT,
     SNAPSHOT_KEY_SEND_MESSAGES,
     capture_send_messages_state,
+    compute_reverted_send_messages_pair,
     has_our_send_messages_deny,
 )
 
@@ -60,33 +62,75 @@ class OverwriteManager:
 
         If overwrite becomes empty, delete it.
         """
-        current = channel.overwrites_for(member)
+        await self.revert_mute_by_user_id(
+            channel,
+            member.id,
+            snapshot,
+            member=member,
+        )
+
+    async def revert_mute_by_user_id(
+        self,
+        channel: discord.TextChannel,
+        user_id: int,
+        snapshot: dict[str, Any] | None,
+        *,
+        member: discord.Member | None = None,
+    ) -> None:
+        """
+        Revert send_messages deny for user_id (member on guild or left).
+
+        Uses set_permissions when member is known; otherwise channel permission HTTP
+        endpoints (Discord allows member overwrites by id even if not in guild).
+        """
+        lookup: discord.Member | discord.Object = (
+            member if member is not None else discord.Object(id=user_id)
+        )
+        current = channel.overwrites_for(lookup)
         allow, deny = current.pair()
-
-        # Remove send_messages from deny
-        new_deny_value = deny.value & ~SEND_MESSAGES_BIT
-        prior = None if snapshot is None else snapshot.get(SNAPSHOT_KEY_SEND_MESSAGES)
-
-        if prior is True:
-            new_allow_value = allow.value | SEND_MESSAGES_BIT
-            new_deny_value = new_deny_value & ~SEND_MESSAGES_BIT
-        elif prior is False:
-            new_allow_value = allow.value & ~SEND_MESSAGES_BIT
-            new_deny_value = new_deny_value | SEND_MESSAGES_BIT
-        else:
-            new_allow_value = allow.value & ~SEND_MESSAGES_BIT
-            new_deny_value = new_deny_value & ~SEND_MESSAGES_BIT
-
-        new_allow = discord.Permissions(new_allow_value)
-        new_deny = discord.Permissions(new_deny_value)
+        new_allow, new_deny = compute_reverted_send_messages_pair(allow, deny, snapshot)
 
         if new_allow.value == 0 and new_deny.value == 0:
-            await channel.set_permissions(member, overwrite=None)
+            await self._apply_channel_permissions(
+                channel,
+                user_id,
+                overwrite=None,
+                member=member,
+            )
             return
 
-        await channel.set_permissions(
-            member,
-            overwrite=discord.PermissionOverwrite.from_pair(new_allow, new_deny),
+        new_overwrite = discord.PermissionOverwrite.from_pair(new_allow, new_deny)
+        await self._apply_channel_permissions(
+            channel,
+            user_id,
+            overwrite=new_overwrite,
+            member=member,
+        )
+
+    async def _apply_channel_permissions(
+        self,
+        channel: discord.TextChannel,
+        user_id: int,
+        *,
+        overwrite: discord.PermissionOverwrite | None,
+        member: discord.Member | None,
+    ) -> None:
+        if member is not None:
+            await channel.set_permissions(member, overwrite=overwrite)
+            return
+
+        http = channel._state.http
+        if overwrite is None:
+            await http.delete_channel_permissions(channel.id, user_id)
+            return
+
+        allow, deny = overwrite.pair()
+        await http.edit_channel_permissions(
+            channel.id,
+            user_id,
+            str(allow.value),
+            str(deny.value),
+            _Overwrites.MEMBER,
         )
 
     async def rollback_after_failed_db(
