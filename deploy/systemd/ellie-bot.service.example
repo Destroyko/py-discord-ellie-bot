@@ -1,0 +1,21 @@
+[Unit]
+Description=Ellie Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+Group=YOUR_USER
+WorkingDirectory=/opt/py-discord-ellie-bot
+ExecStart=/opt/py-discord-ellie-bot/.venv/bin/python /opt/py-discord-ellie-bot/bot.py
+
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+
+# Write logs immediately to journald
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

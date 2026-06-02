@@ -40,6 +40,49 @@ python bot.py
 
 Slash-команды синхронизируются **только с guild** из `guild_id` (мгновенно после запуска).
 
+## Автозапуск через systemd (Linux)
+
+Для стабильной работы в фоне рекомендуется запускать бота как `systemd` service.
+Это освобождает консоль и автоматически перезапускает процесс после падения
+или рестарта сервера.
+
+В репозитории есть шаблон юнита:
+`deploy/systemd/ellie-bot.service.example`
+
+### 1) Скопировать и отредактировать unit
+
+```bash
+sudo cp deploy/systemd/ellie-bot.service.example /etc/systemd/system/ellie-bot.service
+sudo nano /etc/systemd/system/ellie-bot.service
+```
+
+Обязательно проверьте/замените:
+- `User` / `Group`
+- `WorkingDirectory`
+- `ExecStart` (путь к Python в venv и `bot.py`)
+
+### 2) Включить и запустить сервис
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable ellie-bot.service
+sudo systemctl start ellie-bot.service
+```
+
+### 3) Проверить состояние и логи
+
+```bash
+sudo systemctl status ellie-bot.service
+journalctl -u ellie-bot.service -f
+```
+
+Полезные команды:
+
+```bash
+sudo systemctl restart ellie-bot.service
+sudo systemctl stop ellie-bot.service
+```
+
 ## Команды
 
 | Команда | Где вызывать |
