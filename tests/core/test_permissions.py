@@ -14,6 +14,7 @@ from core.permissions import (
     can_moderate,
     can_mute_target,
 )
+from modules.channel_mutes.mute_scope import MuteScope
 from tests.conftest import app_config, make_guild_me, make_member
 
 
@@ -109,39 +110,46 @@ class TestBotCanModerateMember:
         ok, msg = bot_can_moderate_member(guild, target)
         assert ok is True and msg is None
 
-    def test_no_guild_permissions(self) -> None:
+    def test_no_guild_permissions_lists_both(self) -> None:
         guild = MagicMock()
         guild.me = make_guild_me(manage_channels=False, manage_roles=False)
         target = make_member(member_id=2)
         ok, msg = bot_can_moderate_member(guild, target)
         assert ok is False
-        assert msg == (
-            "Не могу выдать наказание: у бота нет серверных прав: "
-            "«Управление каналами», «Управление ролями»."
-        )
+        assert msg is not None
+        assert "Не хватает прав" in msg
+        # Ordered by discovery: channels before roles.
+        assert msg.index("Управление каналами") < msg.index("Управление ролями")
 
-    def test_no_channel_permissions(self) -> None:
+    def test_channel_threads_scope_message(self) -> None:
         guild = MagicMock()
         guild.me = make_guild_me()
+        guild.me.guild_permissions.send_messages_in_threads = False
         target = make_member(member_id=2)
         channel = MagicMock()
         channel.name = "general"
         channel.permissions_for = MagicMock(
             return_value=SimpleNamespace(
-                manage_channels=False,
-                manage_roles=True,
+                manage_channels=True,
+                manage_roles=False,
+                send_messages_in_threads=False,
             )
         )
-        ok, msg = bot_can_moderate_member(guild, target, channel)
-        assert ok is False
-        assert msg == (
-            "Не могу выдать наказание: у бота нет прав в канале #general: "
-            "«Управление каналами»."
+        ok, msg = bot_can_moderate_member(
+            guild, target, channel, MuteScope.THREADS_ONLY
         )
+        assert ok is False
+        assert msg is not None
+        assert "Управление правами" in msg
+        assert "#general" in msg
+        assert "в ветках" in msg
+        assert "Отправка сообщений в ветках" in msg
 
-    def test_role_too_low(self) -> None:
+    def test_role_too_low_listed(self) -> None:
         guild = MagicMock()
         guild.me = make_guild_me(top_role_position=3)
         target = make_member(member_id=2, top_role_position=5)
         ok, msg = bot_can_moderate_member(guild, target)
-        assert ok is False and msg is not None
+        assert ok is False
+        assert msg is not None
+        assert "роль бота должна быть выше" in msg

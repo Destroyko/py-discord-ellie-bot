@@ -7,6 +7,7 @@ import logging
 import discord
 
 from core.config_loader import AppConfig
+from modules.channel_mutes.mute_scope import MuteScope, scope_place_phrase
 
 logger = logging.getLogger("ellie_bot")
 
@@ -28,6 +29,7 @@ class ModeratorNotifier:
         reason: str | None,
         previous_duration_text: str | None = None,
         is_extended: bool = False,
+        scope: MuteScope = MuteScope.CHAT_ONLY,
     ) -> None:
         """Notify moderators that a member was muted or extended in a channel."""
         notice_channel = guild.get_channel(self._config.moderator_commands_channel_id)
@@ -39,6 +41,7 @@ class ModeratorNotifier:
             return
 
         reason_text = reason if reason else "не указано"
+        place = scope_place_phrase(scope, channel.mention)
         if is_extended:
             duration_line = (
                 f"с {previous_duration_text} на {duration_text}"
@@ -46,13 +49,13 @@ class ModeratorNotifier:
                 else f"на {duration_text}"
             )
             text = (
-                f"{target.mention} перемючен в чате {channel.mention} {duration_line}\n"
+                f"{target.mention} перемючен {place} {duration_line}\n"
                 "причина:\n"
                 f"{reason_text}"
             )
         else:
             text = (
-                f"{target.mention} замючен в чате {channel.mention}\n"
+                f"{target.mention} замючен {place}\n"
                 f"на {duration_text}\n"
                 "причина:\n"
                 f"{reason_text}"

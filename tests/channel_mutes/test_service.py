@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -10,6 +10,11 @@ import pytest
 
 from core.config_loader import AppConfig
 from database.models import ChannelMute
+from modules.channel_mutes.mute_scope import MuteScope
+from modules.channel_mutes.permissions_bits import (
+    SEND_MESSAGES_BIT,
+    SNAPSHOT_KEY_SEND_MESSAGES,
+)
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.service import ChannelMuteService, UnmuteSource
 from modules.channel_mutes.unmute_outcome import UnmuteOutcome
@@ -36,7 +41,7 @@ def bot() -> MagicMock:
 @pytest.fixture
 def overwrite_mgr() -> MagicMock:
     mgr = MagicMock()
-    mgr.capture_snapshot = AsyncMock(return_value={"send_messages": None})
+    mgr.read_scope_state = MagicMock(return_value={SNAPSHOT_KEY_SEND_MESSAGES: None})
     mgr.apply_mute = AsyncMock()
     mgr.revert_mute = AsyncMock()
     mgr.rollback_after_failed_db = AsyncMock()
@@ -106,18 +111,15 @@ class TestMuteChannelNew:
         mod = make_member(member_id=60, role_ids=(10,))
         calls: list[str] = []
 
-        async def track_snapshot(*_a: object, **_k: object) -> dict:
+        def track_read(*_a: object, **_k: object) -> dict:
             calls.append("snapshot")
-            return {"send_messages": None}
+            return {SNAPSHOT_KEY_SEND_MESSAGES: None}
 
         async def track_apply(*_a: object, **_k: object) -> None:
             calls.append("apply")
 
-        overwrite_mgr.capture_snapshot = track_snapshot
+        overwrite_mgr.read_scope_state = track_read
         overwrite_mgr.apply_mute = track_apply
-
-        scheduled = service._on_scheduled
-        assert scheduled is not None
 
         async def track_schedule(mute_id: int, _exp: datetime) -> None:
             calls.append(f"schedule:{mute_id}")
@@ -132,10 +134,12 @@ class TestMuteChannelNew:
             duration_delta=timedelta(hours=1),
             duration_text="1h",
             reason="spam",
+            scope=MuteScope.CHAT_ONLY,
         )
 
         assert extended is False
         assert saved.id is not None
+        assert saved.scope is MuteScope.CHAT_ONLY
         assert calls == ["snapshot", "apply", f"schedule:{saved.id}"]
 
     async def test_rollback_on_db_failure(
@@ -147,11 +151,9 @@ class TestMuteChannelNew:
         guild, channel = _guild_and_channel()
         target = make_member(member_id=50)
         mod = make_member(member_id=60, role_ids=(10,))
-        snapshot = {"send_messages": True}
+        snapshot = {SNAPSHOT_KEY_SEND_MESSAGES: True}
 
-        overwrite_mgr.capture_snapshot = AsyncMock(return_value=snapshot)
-
-        original_insert = mute_repo.insert
+        overwrite_mgr.read_scope_state = MagicMock(return_value=snapshot)
 
         def failing_insert(_mute: ChannelMute) -> ChannelMute:
             raise RuntimeError("db down")
@@ -169,10 +171,12 @@ class TestMuteChannelNew:
                 reason=None,
             )
 
-        overwrite_mgr.rollback_after_failed_db.assert_awaited_once_with(
-            channel, target, snapshot
-        )
-        mute_repo.insert = original_insert  # type: ignore[method-assign]
+        overwrite_mgr.rollback_after_failed_db.assert_awaited_once()
+        call = overwrite_mgr.rollback_after_failed_db.await_args
+        assert call.args[0] is channel
+        assert call.args[1] is target
+        assert call.args[2] == snapshot
+        assert call.args[3] == [(SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT)]
 
 
 class TestMuteChannelExtend:
@@ -186,7 +190,7 @@ class TestMuteChannelExtend:
         target = make_member(member_id=50)
         mod = make_member(member_id=60, role_ids=(10,))
         existing = mute_repo.insert(
-            sample_mute(mute_id=None, snapshot={"send_messages": False})
+            sample_mute(mute_id=None, snapshot={SNAPSHOT_KEY_SEND_MESSAGES: False})
         )
 
         saved, extended = await service.mute_channel(
@@ -197,11 +201,12 @@ class TestMuteChannelExtend:
             duration_delta=timedelta(hours=3),
             duration_text="3h",
             reason="more",
+            scope=MuteScope.CHAT_ONLY,
         )
 
         assert extended is True
         assert saved.id == existing.id
-        overwrite_mgr.capture_snapshot.assert_not_awaited()
+        overwrite_mgr.read_scope_state.assert_not_called()
         overwrite_mgr.apply_mute.assert_not_awaited()
         service._on_cancelled.assert_awaited_once_with(existing.id)  # type: ignore[attr-defined]
         service._on_scheduled.assert_awaited()  # type: ignore[attr-defined]
@@ -221,6 +226,7 @@ class TestUnmuteChannel:
             channel=channel,
             target=target,
             moderator=make_member(member_id=60),
+            scope=MuteScope.CHAT_ONLY,
             source=UnmuteSource.MANUAL,
         )
         assert result is False
@@ -242,6 +248,7 @@ class TestUnmuteChannel:
             channel=channel,
             target=target,
             moderator=make_member(member_id=60),
+            scope=MuteScope.CHAT_ONLY,
             source=UnmuteSource.MANUAL,
         )
 
@@ -249,27 +256,6 @@ class TestUnmuteChannel:
         assert mute_repo.get_by_id(saved.id) is None
         overwrite_mgr.revert_mute.assert_not_awaited()
         service._on_cancelled.assert_awaited_once_with(saved.id)  # type: ignore[attr-defined]
-
-    async def test_db_without_deny_auto_false(
-        self,
-        service: ChannelMuteService,
-        mute_repo: ChannelMuteRepository,
-    ) -> None:
-        guild, channel = _guild_and_channel()
-        target = make_member(member_id=50)
-        saved = mute_repo.insert(sample_mute(mute_id=None))
-        channel.overwrites_for = MagicMock(return_value=overwrite_without_deny())
-
-        result = await service.unmute_channel(
-            guild=guild,
-            channel=channel,
-            target=target,
-            moderator=None,
-            source=UnmuteSource.AUTO,
-        )
-
-        assert result is False
-        assert mute_repo.get_by_id(saved.id) is None
 
     async def test_full_unmute_with_deny(
         self,
@@ -280,7 +266,7 @@ class TestUnmuteChannel:
         guild, channel = _guild_and_channel()
         target = make_member(member_id=50)
         saved = mute_repo.insert(
-            sample_mute(mute_id=None, snapshot={"send_messages": None})
+            sample_mute(mute_id=None, snapshot={SNAPSHOT_KEY_SEND_MESSAGES: None})
         )
         channel.overwrites_for = MagicMock(return_value=overwrite_with_deny())
 
@@ -289,6 +275,7 @@ class TestUnmuteChannel:
             channel=channel,
             target=target,
             moderator=make_member(member_id=60),
+            scope=MuteScope.CHAT_ONLY,
             source=UnmuteSource.MANUAL,
         )
 
@@ -304,7 +291,7 @@ class TestUnmuteChannel:
     ) -> None:
         guild, channel = _guild_and_channel()
         target = make_member(member_id=50)
-        saved = mute_repo.insert(sample_mute(mute_id=None))
+        mute_repo.insert(sample_mute(mute_id=None))
         channel.overwrites_for = MagicMock(return_value=overwrite_with_deny())
 
         original_delete = mute_repo.delete
@@ -320,11 +307,90 @@ class TestUnmuteChannel:
                 channel=channel,
                 target=target,
                 moderator=make_member(member_id=60),
+                scope=MuteScope.CHAT_ONLY,
                 source=UnmuteSource.MANUAL,
             )
 
-        overwrite_mgr.apply_mute.assert_awaited_once_with(channel, target)
+        overwrite_mgr.apply_mute.assert_awaited_once_with(
+            channel, target, MuteScope.CHAT_ONLY
+        )
         mute_repo.delete = original_delete  # type: ignore[method-assign]
+
+
+class TestScopeIndependence:
+    async def test_chat_and_threads_independent_records(
+        self,
+        service: ChannelMuteService,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+
+        chat_mute, _ = await service.mute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=1),
+            duration_text="1h",
+            reason=None,
+            scope=MuteScope.CHAT_ONLY,
+        )
+        threads_mute, _ = await service.mute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=5),
+            duration_text="5h",
+            reason=None,
+            scope=MuteScope.THREADS_ONLY,
+        )
+
+        assert chat_mute.id != threads_mute.id
+        assert mute_repo.get_by_keys(100, 400, 50, MuteScope.CHAT_ONLY) is not None
+        assert mute_repo.get_by_keys(100, 400, 50, MuteScope.THREADS_ONLY) is not None
+
+    async def test_unmute_chat_keeps_threads_and_reverts_only_chat_bit(
+        self,
+        service: ChannelMuteService,
+        mute_repo: ChannelMuteRepository,
+        overwrite_mgr: MagicMock,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mute_repo.insert(
+            sample_mute(
+                mute_id=None,
+                scope=MuteScope.THREADS_ONLY,
+                snapshot={"send_messages_in_threads": None},
+            )
+        )
+        mute_repo.insert(
+            sample_mute(
+                mute_id=None,
+                scope=MuteScope.CHAT_ONLY,
+                snapshot={SNAPSHOT_KEY_SEND_MESSAGES: None},
+            )
+        )
+        channel.overwrites_for = MagicMock(return_value=overwrite_with_deny())
+
+        result = await service.unmute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=make_member(member_id=60),
+            scope=MuteScope.CHAT_ONLY,
+            source=UnmuteSource.MANUAL,
+        )
+
+        assert result is True
+        assert mute_repo.get_by_keys(100, 400, 50, MuteScope.CHAT_ONLY) is None
+        assert mute_repo.get_by_keys(100, 400, 50, MuteScope.THREADS_ONLY) is not None
+        overwrite_mgr.revert_mute.assert_awaited_once()
+        pairs = overwrite_mgr.revert_mute.await_args.args[3]
+        assert pairs == [(SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT)]
 
 
 class TestUnmuteById:

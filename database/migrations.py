@@ -1,6 +1,6 @@
 """SQLite schema definitions."""
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 CREATE_CHANNEL_MUTES_TABLE = """
 CREATE TABLE IF NOT EXISTS channel_mutes (
@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS channel_mutes (
     created_at TEXT NOT NULL,
     expire_at TEXT NOT NULL,
     overwrite_snapshot TEXT,
-    UNIQUE (guild_id, channel_id, user_id)
+    scope TEXT NOT NULL DEFAULT 'chat_only',
+    UNIQUE (guild_id, channel_id, user_id, scope)
 );
 """
 
@@ -39,3 +40,8 @@ ALL_MIGRATIONS = (
     CREATE_INDEX_EXPIRE_AT,
     CREATE_INDEX_USER,
 )
+
+# Tables rebuilt (with data reset) when upgrading from an older schema version.
+# The mute scope feature changes the channel_mutes unique key, so a clean
+# rebuild is used instead of an in-place backfill (see plan).
+DROP_CHANNEL_MUTES_TABLE = "DROP TABLE IF EXISTS channel_mutes;"

@@ -5,12 +5,9 @@ from __future__ import annotations
 import discord
 
 from core.config_loader import AppConfig
+from modules.channel_mutes.mute_scope import MuteScope
 
 _MSG_DENIED = "Нельзя применить наказание к этому участнику."
-_PERMISSION_LABELS_RU = {
-    "manage_channels": "Управление каналами",
-    "manage_roles": "Управление ролями",
-}
 
 
 def can_moderate(member: discord.Member, config: AppConfig) -> bool:
@@ -85,9 +82,13 @@ def bot_can_moderate_member(
     guild: discord.Guild,
     target: discord.Member,
     channel: discord.abc.GuildChannel | None = None,
+    scope: MuteScope = MuteScope.CHAT_ONLY,
 ) -> tuple[bool, str | None]:
     """
-    Check whether the bot can apply overwrites to the target.
+    Check whether the bot can apply overwrites to the target for ``scope``.
+
+    Missing permissions are collected in discovery order and returned as a
+    bullet list so the moderator sees exactly what is lacking.
 
     :returns: (ok, error_message_ru)
     """
@@ -95,37 +96,48 @@ def bot_can_moderate_member(
     if me is None:
         return False, "Не могу выдать наказание: бот не найден на сервере."
 
-    missing_guild_permissions = _missing_permissions(me.guild_permissions)
-    if missing_guild_permissions:
-        return (
-            False,
-            "Не могу выдать наказание: у бота нет серверных прав: "
-            f"{_format_permissions_list(missing_guild_permissions)}.",
-        )
+    aspect = _scope_aspect(scope)
+    missing: list[str] = []
+
+    if not me.guild_permissions.manage_channels:
+        missing.append("право сервера «Управление каналами»")
+    if not me.guild_permissions.manage_roles:
+        missing.append("право сервера «Управление ролями»")
+    if scope.affects_threads and not bool(
+        getattr(me.guild_permissions, "send_messages_in_threads", False)
+    ):
+        missing.append("право сервера «Отправка сообщений в ветках»")
 
     if channel is not None:
         channel_permissions = channel.permissions_for(me)
-        missing_channel_permissions = _missing_permissions(channel_permissions)
-        if missing_channel_permissions:
-            return (
-                False,
-                "Не могу выдать наказание: у бота нет прав в канале "
-                f"#{channel.name}: {_format_permissions_list(missing_channel_permissions)}.",
+        if not channel_permissions.manage_channels:
+            missing.append(f"право «Управление каналом» в канале #{channel.name}")
+        if not channel_permissions.manage_roles:
+            missing.append(
+                f"право «Управление правами» в канале #{channel.name} "
+                f"(для управления общением {aspect})"
+            )
+        if scope.affects_threads and not bool(
+            getattr(channel_permissions, "send_messages_in_threads", False)
+        ):
+            missing.append(
+                f"право «Отправка сообщений в ветках» в канале #{channel.name}"
             )
 
     if me.top_role <= target.top_role:
-        return False, "Не могу выдать наказание: роль бота ниже роли пользователя."
+        missing.append("роль бота должна быть выше роли пользователя")
+
+    if missing:
+        bullet_list = "\n".join(f"• {item}" for item in missing)
+        return False, f"Не могу выдать наказание. Не хватает прав:\n{bullet_list}"
 
     return True, None
 
 
-def _missing_permissions(permissions: discord.Permissions | object) -> list[str]:
-    missing: list[str] = []
-    for key in ("manage_channels", "manage_roles"):
-        if not bool(getattr(permissions, key, False)):
-            missing.append(_PERMISSION_LABELS_RU[key])
-    return missing
-
-
-def _format_permissions_list(permission_names: list[str]) -> str:
-    return ", ".join(f"«{name}»" for name in permission_names)
+def _scope_aspect(scope: MuteScope) -> str:
+    """Russian fragment describing what the scope restricts."""
+    if scope is MuteScope.CHAT_ONLY:
+        return "в чате"
+    if scope is MuteScope.THREADS_ONLY:
+        return "в ветках"
+    return "в чате и ветках"

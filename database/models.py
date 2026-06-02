@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+from modules.channel_mutes.mute_scope import MuteScope
 
 
 @dataclass
@@ -20,3 +22,4 @@ class ChannelMute:
     created_at: datetime
     expire_at: datetime
     overwrite_snapshot: dict[str, Any] | None
+    scope: MuteScope = field(default=MuteScope.CHAT_ONLY)

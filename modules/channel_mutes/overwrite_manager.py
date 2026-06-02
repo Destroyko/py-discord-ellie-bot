@@ -8,43 +8,42 @@ from typing import Any
 import discord
 from discord.abc import _Overwrites
 
+from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.permissions_bits import (
-    SEND_MESSAGES_BIT,
-    SNAPSHOT_KEY_SEND_MESSAGES,
-    capture_send_messages_state,
-    compute_reverted_send_messages_pair,
-    has_our_send_messages_deny,
+    capture_state_for_scope,
+    compute_reverted_pair,
+    deny_flag_value_for_scope,
 )
 
 logger = logging.getLogger("ellie_bot")
 
+# A (snapshot_key, permission_bit) pair, as produced by permissions_bits.
+BitPair = tuple[str, int]
+
 
 class OverwriteManager:
-    """Apply and revert send_messages deny for a member in a text channel."""
+    """Apply and revert send-message deny bits for a member in a text channel."""
 
-    async def capture_snapshot(
-        self,
+    @staticmethod
+    def read_scope_state(
         channel: discord.TextChannel,
-        member: discord.Member,
-    ) -> dict[str, Any] | None:
-        """Capture bot-managed permission state before mute."""
+        member: discord.Member | discord.abc.Snowflake,
+        scope: MuteScope,
+    ) -> dict[str, Any]:
+        """Capture tri-state of the bits managed by ``scope`` before mute."""
         existing = channel.overwrites_for(member)
-        if existing.pair() == (discord.Permissions.none(), discord.Permissions.none()):
-            return None
-        state = capture_send_messages_state(existing)
-        if state.get(SNAPSHOT_KEY_SEND_MESSAGES) is None and not has_our_send_messages_deny(existing):
-            return None
-        return state
+        return capture_state_for_scope(existing, scope)
 
     async def apply_mute(
         self,
         channel: discord.TextChannel,
         member: discord.Member,
+        scope: MuteScope,
     ) -> None:
-        """Merge send_messages deny into member overwrite."""
+        """Merge the scope's deny bits into the member overwrite."""
         current = channel.overwrites_for(member)
         allow, deny = current.pair()
-        new_deny = deny.value | SEND_MESSAGES_BIT
+        new_deny = deny.value | deny_flag_value_for_scope(scope)
         new_overwrite = discord.PermissionOverwrite.from_pair(
             discord.Permissions(allow.value),
             discord.Permissions(new_deny),
@@ -56,16 +55,14 @@ class OverwriteManager:
         channel: discord.TextChannel,
         member: discord.Member,
         snapshot: dict[str, Any] | None,
+        pairs: list[BitPair],
     ) -> None:
-        """
-        Remove only our send_messages deny and restore prior state from snapshot.
-
-        If overwrite becomes empty, delete it.
-        """
+        """Revert only ``pairs`` bits for a member, restoring prior state."""
         await self.revert_mute_by_user_id(
             channel,
             member.id,
             snapshot,
+            pairs,
             member=member,
         )
 
@@ -74,21 +71,22 @@ class OverwriteManager:
         channel: discord.TextChannel,
         user_id: int,
         snapshot: dict[str, Any] | None,
+        pairs: list[BitPair],
         *,
         member: discord.Member | None = None,
     ) -> None:
         """
-        Revert send_messages deny for user_id (member on guild or left).
+        Revert only ``pairs`` bits for user_id (member on guild or left).
 
-        Uses set_permissions when member is known; otherwise channel permission HTTP
-        endpoints (Discord allows member overwrites by id even if not in guild).
+        Bits outside ``pairs`` are preserved so an independent mute keeps its
+        deny in place. If the overwrite becomes empty, it is deleted.
         """
         lookup: discord.Member | discord.Object = (
             member if member is not None else discord.Object(id=user_id)
         )
         current = channel.overwrites_for(lookup)
         allow, deny = current.pair()
-        new_allow, new_deny = compute_reverted_send_messages_pair(allow, deny, snapshot)
+        new_allow, new_deny = compute_reverted_pair(allow, deny, snapshot, pairs)
 
         if new_allow.value == 0 and new_deny.value == 0:
             await self._apply_channel_permissions(
@@ -138,10 +136,11 @@ class OverwriteManager:
         channel: discord.TextChannel,
         member: discord.Member,
         snapshot: dict[str, Any] | None,
+        pairs: list[BitPair],
     ) -> None:
         """Revert Discord state after DB/scheduling failure."""
         try:
-            await self.revert_mute(channel, member, snapshot)
+            await self.revert_mute(channel, member, snapshot, pairs)
         except discord.HTTPException:
             logger.exception(
                 "Failed to rollback overwrite for user %s in channel %s",

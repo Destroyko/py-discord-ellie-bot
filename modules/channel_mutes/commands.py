@@ -13,7 +13,7 @@ from core.channel_context import (
     is_ephemeral_mute_command_reply,
     is_ephemeral_reply,
     resolve_invocation_channel,
-    resolve_target_channel,
+    resolve_mute_target,
 )
 from core.config_loader import AppConfig
 from core.exceptions import (
@@ -33,11 +33,33 @@ from core.responses import (
 )
 from modules.channel_mutes.duration import parse_duration
 from modules.channel_mutes.help_text import HELP_MESSAGE
+from modules.channel_mutes.mute_scope import (
+    COMMAND_SCOPE_ALL,
+    COMMAND_SCOPE_CHAT,
+    COMMAND_SCOPE_THREADS,
+    MuteScope,
+    scope_place_phrase,
+)
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.service import ChannelMuteService
 from modules.channel_mutes.user_resolver import resolve_user
 
 logger = logging.getLogger("ellie_bot")
+
+_SCOPE_CHOICES = [
+    app_commands.Choice(name="чат", value=COMMAND_SCOPE_CHAT),
+    app_commands.Choice(name="ветки", value=COMMAND_SCOPE_THREADS),
+    app_commands.Choice(name="чат и ветки", value=COMMAND_SCOPE_ALL),
+]
+
+
+def _active_mute_target_label(scope: MuteScope, channel_name: str) -> str:
+    """Human-readable target label for /active_mutes, by scope."""
+    if scope is MuteScope.THREADS_ONLY:
+        return f"только ветки чата #{channel_name}"
+    if scope is MuteScope.CHAT_AND_THREADS:
+        return f"чат #{channel_name} и его ветки"
+    return f"#{channel_name}"
 
 
 class ChannelMutesCog(commands.Cog):
@@ -77,21 +99,24 @@ class ChannelMutesCog(commands.Cog):
 
     @app_commands.command(
         name="mute_user",
-        description="Временно запретить пользователю писать в канал",
+        description="Временно запретить пользователю писать в канал или ветках",
     )
     @app_commands.describe(
         user="Пользователь",
         duration="Длительность (10m, 2h, 3d)",
         reason="Причина",
-        channel="Целевой канал (обязательно в бот-командах)",
+        channel="Целевой канал или ветка (обязательно в бот-командах)",
+        scope="Где запретить: чат / ветки / чат и ветки",
     )
+    @app_commands.choices(scope=_SCOPE_CHOICES)
     async def mute_user(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
         duration: str,
         reason: str | None = None,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | discord.Thread | None = None,
+        scope: str | None = None,
     ) -> None:
         inv_kind = None
         try:
@@ -111,8 +136,8 @@ class ChannelMutesCog(commands.Cog):
                 ephemeral=mute_reply_ephemeral,
             )
 
-            target_ctx = resolve_target_channel(invocation, channel, self.config)
-            target_channel = target_ctx.channel
+            target = resolve_mute_target(invocation, channel, scope, self.config)
+            overwrite_channel = target.overwrite_channel
 
             target_member = await resolve_user(guild, user)
 
@@ -123,7 +148,8 @@ class ChannelMutesCog(commands.Cog):
             ok, bot_msg = bot_can_moderate_member(
                 guild,
                 target_member,
-                target_channel,
+                overwrite_channel,
+                target.scope,
             )
             if not ok:
                 raise PermissionDeniedError(bot_msg or "Нельзя выдать наказание.")
@@ -131,23 +157,17 @@ class ChannelMutesCog(commands.Cog):
             duration_text = duration.strip()
             mute, extended = await self.service.mute_channel(
                 guild=guild,
-                channel=target_channel,
+                channel=overwrite_channel,
                 target=target_member,
                 moderator=moderator,
                 duration_delta=delta,
                 duration_text=duration_text,
                 reason=reason,
+                scope=target.scope,
             )
-            if extended:
-                text = (
-                    f"Наказание обновлено: {target_member.mention}, "
-                    f"канал {target_channel.mention}, срок {duration_text}"
-                )
-            else:
-                text = (
-                    f"Наказание выдано: {target_member.mention}, "
-                    f"канал {target_channel.mention}, срок {duration_text}"
-                )
+            place = scope_place_phrase(target.scope, overwrite_channel.mention)
+            verb = "обновлено" if extended else "выдано"
+            text = f"Наказание {verb}: {target_member.mention}, {place}, срок {duration_text}"
             await reply_moderator(
                 interaction,
                 text,
@@ -197,17 +217,20 @@ class ChannelMutesCog(commands.Cog):
 
     @app_commands.command(
         name="unmute_user",
-        description="Снять запрет на отправку сообщений в канале",
+        description="Снять запрет на отправку сообщений в канале или ветках",
     )
     @app_commands.describe(
         user="Пользователь",
-        channel="Канал (обязательно в бот-командах)",
+        channel="Канал или ветка (обязательно в бот-командах)",
+        scope="Откуда снять: чат / ветки / чат и ветки",
     )
+    @app_commands.choices(scope=_SCOPE_CHOICES)
     async def unmute_user(
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | discord.Thread | None = None,
+        scope: str | None = None,
     ) -> None:
         inv_kind = None
         try:
@@ -222,34 +245,33 @@ class ChannelMutesCog(commands.Cog):
 
             await defer_moderator(interaction, invocation_kind=invocation.kind)
 
-            target_ctx = resolve_target_channel(invocation, channel, self.config)
-            target_channel = target_ctx.channel
+            target = resolve_mute_target(invocation, channel, scope, self.config)
+            overwrite_channel = target.overwrite_channel
             target_member = await resolve_user(guild, user)
+            place = scope_place_phrase(target.scope, overwrite_channel.mention)
 
             existing = self.repository.get_by_keys(
-                guild.id, target_channel.id, target_member.id
+                guild.id, overwrite_channel.id, target_member.id, target.scope
             )
             if existing is None:
                 raise ValidationError(
-                    f"Пользователь не ограничен в общении в канале #{target_channel.name}."
+                    f"Пользователь не ограничен в общении {place}."
                 )
 
             removed = await self.service.unmute_channel(
                 guild=guild,
-                channel=target_channel,
+                channel=overwrite_channel,
                 target=target_member,
                 moderator=moderator,
+                scope=target.scope,
             )
             if not removed:
                 raise ValidationError(
-                    f"Пользователь не ограничен в общении в канале #{target_channel.name}."
+                    f"Пользователь не ограничен в общении {place}."
                 )
 
             embed = discord.Embed(
-                description=(
-                    f"Запрет снят: {target_member.mention}, "
-                    f"канал {target_channel.mention}"
-                ),
+                description=f"Запрет снят: {target_member.mention}, {place}",
                 color=discord.Color.green(),
             )
             avatar = moderator.avatar or moderator.default_avatar
@@ -308,9 +330,10 @@ class ChannelMutesCog(commands.Cog):
                 for mute in mutes:
                     ch = guild.get_channel(mute.channel_id)
                     ch_name = ch.name if isinstance(ch, discord.TextChannel) else str(mute.channel_id)
+                    label = _active_mute_target_label(mute.scope, ch_name)
                     exp = mute.expire_at.strftime("%Y-%m-%d %H:%M UTC")
                     reason = mute.reason or "—"
-                    lines.append(f"• #{ch_name} — до {exp}, причина: {reason}")
+                    lines.append(f"• {label} — до {exp}, причина: {reason}")
                 text = "\n".join(lines)
 
             await reply_moderator(

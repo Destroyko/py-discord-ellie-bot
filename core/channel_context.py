@@ -9,6 +9,10 @@ import discord
 
 from core.config_loader import AppConfig
 from core.exceptions import ValidationError
+from modules.channel_mutes.mute_scope import (
+    MuteScope,
+    scope_from_command_value,
+)
 
 
 class ChannelKind(Enum):
@@ -24,7 +28,7 @@ class InvocationContext:
     """Resolved context for where a slash command was invoked."""
 
     kind: ChannelKind
-    channel: discord.TextChannel
+    channel: discord.TextChannel | discord.Thread
 
 
 @dataclass(frozen=True)
@@ -33,6 +37,20 @@ class TargetChannelContext:
 
     channel: discord.TextChannel
     channel_param_required: bool
+
+
+@dataclass(frozen=True)
+class MuteTarget:
+    """Resolved mute application target.
+
+    ``overwrite_channel`` is the text channel whose permission overwrites are
+    edited (the parent channel when a thread was targeted).
+    """
+
+    overwrite_channel: discord.TextChannel
+    scope: MuteScope
+    channel_param_required: bool
+    target_is_thread: bool
 
 
 def classify_channel(channel_id: int, config: AppConfig) -> ChannelKind:
@@ -49,15 +67,26 @@ def resolve_invocation_channel(
     config: AppConfig,
 ) -> InvocationContext:
     """
-  Resolve the channel where the command was invoked.
+    Resolve the channel (or thread) where the command was invoked.
 
-  :raises ValidationError: if not a text channel.
+    Threads inherit the routing classification of their parent text channel
+    for special channels (mod-commands / bot-logs).
+
+    :raises ValidationError: if not a text channel or text thread.
     """
-    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-        raise ValidationError("Команда доступна только в текстовых каналах.")
+    channel = interaction.channel
+    if interaction.guild is None or not isinstance(
+        channel, (discord.TextChannel, discord.Thread)
+    ):
+        raise ValidationError("Команда доступна только в текстовых каналах и ветках.")
 
-    kind = classify_channel(interaction.channel.id, config)
-    return InvocationContext(kind=kind, channel=interaction.channel)
+    classify_id = channel.id
+    if isinstance(channel, discord.Thread) and channel.parent_id is not None:
+        if classify_channel(channel.parent_id, config) != ChannelKind.PUBLIC:
+            classify_id = channel.parent_id
+
+    kind = classify_channel(classify_id, config)
+    return InvocationContext(kind=kind, channel=channel)
 
 
 def assert_commands_allowed_in_channel(kind: ChannelKind, *, for_help: bool = False, for_active_mutes: bool = False) -> None:
@@ -76,15 +105,21 @@ def assert_commands_allowed_in_channel(kind: ChannelKind, *, for_help: bool = Fa
             )
 
 
-def resolve_target_channel(
+def resolve_mute_target(
     invocation: InvocationContext,
-    channel_param: discord.TextChannel | None,
+    channel_param: discord.TextChannel | discord.Thread | None,
+    scope_value: str | None,
     config: AppConfig,
-) -> TargetChannelContext:
+) -> MuteTarget:
     """
-    Resolve the channel where mute/unmute applies.
+    Resolve where mute/unmute applies and with which :class:`MuteScope`.
 
-    :raises ValidationError: on missing required param or forbidden target.
+    Thread targets edit the parent text channel's overwrites. The default
+    scope, when not given, is ``chat`` for text channels and ``threads`` for
+    thread targets.
+
+    :raises ValidationError: on missing required param, forbidden target,
+        forum threads, or an invalid scope/target combination.
     """
     if invocation.kind == ChannelKind.MOD_COMMANDS:
         if channel_param is None:
@@ -97,14 +132,45 @@ def resolve_target_channel(
         target = channel_param or invocation.channel
         required = False
 
-    if not isinstance(target, discord.TextChannel):
-        raise ValidationError("Команда доступна только в текстовых каналах.")
+    if not isinstance(target, (discord.TextChannel, discord.Thread)):
+        raise ValidationError("Команда доступна только в текстовых каналах и ветках.")
 
-    target_kind = classify_channel(target.id, config)
+    target_is_thread = isinstance(target, discord.Thread)
+    if target_is_thread:
+        parent = target.parent
+        if not isinstance(parent, discord.TextChannel):
+            raise ValidationError(
+                "Наказание поддерживается только в текстовых ветках (форумы не поддерживаются)."
+            )
+        overwrite_channel = parent
+    else:
+        overwrite_channel = target
+
+    target_kind = classify_channel(overwrite_channel.id, config)
     if target_kind in (ChannelKind.MOD_COMMANDS, ChannelKind.BOT_LOGS):
         raise ValidationError("Нельзя выдать наказание в этот канал.")
 
-    return TargetChannelContext(channel=target, channel_param_required=required)
+    scope = _resolve_scope(scope_value, target_is_thread)
+
+    return MuteTarget(
+        overwrite_channel=overwrite_channel,
+        scope=scope,
+        channel_param_required=required,
+        target_is_thread=target_is_thread,
+    )
+
+
+def _resolve_scope(scope_value: str | None, target_is_thread: bool) -> MuteScope:
+    """Resolve effective scope from the command value and the target type."""
+    if scope_value is None:
+        return MuteScope.THREADS_ONLY if target_is_thread else MuteScope.CHAT_ONLY
+
+    scope = scope_from_command_value(scope_value)
+    if target_is_thread and scope is MuteScope.CHAT_ONLY:
+        raise ValidationError(
+            "Для ветки нельзя выбрать «только чат». Выберите «ветки» или «чат и ветки»."
+        )
+    return scope
 
 
 def is_ephemeral_reply(invocation_kind: ChannelKind) -> bool:

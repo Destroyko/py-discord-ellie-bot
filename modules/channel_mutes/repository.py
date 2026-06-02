@@ -8,6 +8,7 @@ from typing import Any
 
 from database.database import Database
 from database.models import ChannelMute
+from modules.channel_mutes.mute_scope import MuteScope, scope_from_stored_value
 
 
 def _utc_now() -> datetime:
@@ -29,6 +30,7 @@ def _row_to_mute(row: Any) -> ChannelMute:
     snapshot: dict[str, Any] | None = None
     if snapshot_raw:
         snapshot = json.loads(snapshot_raw)
+    scope_raw = row["scope"] if "scope" in row.keys() else MuteScope.CHAT_ONLY.value
     return ChannelMute(
         id=row["id"],
         guild_id=row["guild_id"],
@@ -39,6 +41,7 @@ def _row_to_mute(row: Any) -> ChannelMute:
         created_at=_from_iso(row["created_at"]),
         expire_at=_from_iso(row["expire_at"]),
         overwrite_snapshot=snapshot,
+        scope=scope_from_stored_value(scope_raw),
     )
 
 
@@ -58,8 +61,8 @@ class ChannelMuteRepository:
             """
             INSERT INTO channel_mutes (
                 guild_id, channel_id, user_id, moderator_id,
-                reason, created_at, expire_at, overwrite_snapshot
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                reason, created_at, expire_at, overwrite_snapshot, scope
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 mute.guild_id,
@@ -70,6 +73,7 @@ class ChannelMuteRepository:
                 _to_iso(mute.created_at),
                 _to_iso(mute.expire_at),
                 snapshot_json,
+                mute.scope.value,
             ),
         )
         conn.commit()
@@ -106,15 +110,17 @@ class ChannelMuteRepository:
         conn.execute("DELETE FROM channel_mutes WHERE id = ?", (mute_id,))
         conn.commit()
 
-    def delete_by_keys(self, guild_id: int, channel_id: int, user_id: int) -> None:
+    def delete_by_keys(
+        self, guild_id: int, channel_id: int, user_id: int, scope: MuteScope
+    ) -> None:
         """Remove a mute by unique business key."""
         conn = self._db.connect()
         conn.execute(
             """
             DELETE FROM channel_mutes
-            WHERE guild_id = ? AND channel_id = ? AND user_id = ?
+            WHERE guild_id = ? AND channel_id = ? AND user_id = ? AND scope = ?
             """,
-            (guild_id, channel_id, user_id),
+            (guild_id, channel_id, user_id, scope.value),
         )
         conn.commit()
 
@@ -129,20 +135,34 @@ class ChannelMuteRepository:
         return _row_to_mute(row)
 
     def get_by_keys(
-        self, guild_id: int, channel_id: int, user_id: int
+        self, guild_id: int, channel_id: int, user_id: int, scope: MuteScope
     ) -> ChannelMute | None:
-        """Fetch mute by guild/channel/user unique key."""
+        """Fetch mute by guild/channel/user/scope unique key."""
         conn = self._db.connect()
         row = conn.execute(
+            """
+            SELECT * FROM channel_mutes
+            WHERE guild_id = ? AND channel_id = ? AND user_id = ? AND scope = ?
+            """,
+            (guild_id, channel_id, user_id, scope.value),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_mute(row)
+
+    def list_for_user_in_channel(
+        self, guild_id: int, channel_id: int, user_id: int
+    ) -> list[ChannelMute]:
+        """List all scope records for a user in one channel."""
+        conn = self._db.connect()
+        rows = conn.execute(
             """
             SELECT * FROM channel_mutes
             WHERE guild_id = ? AND channel_id = ? AND user_id = ?
             """,
             (guild_id, channel_id, user_id),
-        ).fetchone()
-        if row is None:
-            return None
-        return _row_to_mute(row)
+        ).fetchall()
+        return [_row_to_mute(row) for row in rows]
 
     def list_active_for_user(self, guild_id: int, user_id: int) -> list[ChannelMute]:
         """List non-expired mutes for a user (by DB expire_at)."""

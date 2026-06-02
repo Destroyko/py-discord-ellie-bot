@@ -2,46 +2,74 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import discord
 
-# Extend this list to deny additional permission flags with the same command later.
-# Note: use flag attributes without () — send_messages is not callable in discord.py 2.x.
+from modules.channel_mutes.mute_scope import MuteScope
+
+# Note: use flag attributes without () — flags are not callable in discord.py 2.x.
 SEND_MESSAGES_FLAG = discord.Permissions.send_messages
-# Bitmask for bitwise ops on PermissionOverwrite pair() values (flag_value uses .flag, not .value).
+SEND_MESSAGES_IN_THREADS_FLAG = discord.Permissions.send_messages_in_threads
+
+# Bitmasks for bitwise ops on PermissionOverwrite pair() values (flag uses .flag).
 SEND_MESSAGES_BIT: int = SEND_MESSAGES_FLAG.flag
-PERMISSIONS_TO_DENY: tuple[Any, ...] = (SEND_MESSAGES_FLAG,)
+SEND_MESSAGES_IN_THREADS_BIT: int = SEND_MESSAGES_IN_THREADS_FLAG.flag
+
+SNAPSHOT_KEY_SEND_MESSAGES = "send_messages"
+SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS = "send_messages_in_threads"
+
+# Map each scope to the (snapshot_key, bit) pairs it manages.
+_SCOPE_BITS: dict[MuteScope, tuple[tuple[str, int], ...]] = {
+    MuteScope.CHAT_ONLY: ((SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT),),
+    MuteScope.THREADS_ONLY: (
+        (SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS, SEND_MESSAGES_IN_THREADS_BIT),
+    ),
+    MuteScope.CHAT_AND_THREADS: (
+        (SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT),
+        (SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS, SEND_MESSAGES_IN_THREADS_BIT),
+    ),
+}
 
 
-def combined_deny_flag_value() -> int:
-    """Bitmask of all permission flags the bot denies on mute."""
+def scope_bit_pairs(scope: MuteScope) -> tuple[tuple[str, int], ...]:
+    """Return the (snapshot_key, permission_bit) pairs managed by a scope."""
+    return _SCOPE_BITS[scope]
+
+
+def deny_flag_value_for_scope(scope: MuteScope) -> int:
+    """Bitmask of all permission flags the bot denies for a given scope."""
     value = 0
-    for flag in PERMISSIONS_TO_DENY:
-        value |= flag.flag
+    for _key, bit in _SCOPE_BITS[scope]:
+        value |= bit
     return value
 
 
-SNAPSHOT_KEY_SEND_MESSAGES = "send_messages"
-
-
-def capture_send_messages_state(
+def capture_state_for_scope(
     overwrite: discord.PermissionOverwrite | None,
-) -> dict[str, Any] | None:
+    scope: MuteScope,
+) -> dict[str, Any]:
     """
-    Capture send_messages tri-state before applying mute.
+    Capture the tri-state of every bit managed by ``scope`` before applying mute.
 
-    Values: true (allow), false (deny), null (inherit / no explicit bit).
+    Values per key: true (allow), false (deny), null (inherit / no explicit bit).
     """
+    state: dict[str, Any] = {}
     if overwrite is None:
-        return {SNAPSHOT_KEY_SEND_MESSAGES: None}
+        for key, _bit in _SCOPE_BITS[scope]:
+            state[key] = None
+        return state
 
     allow, deny = overwrite.pair()
-    if allow.value & SEND_MESSAGES_BIT:
-        return {SNAPSHOT_KEY_SEND_MESSAGES: True}
-    if deny.value & SEND_MESSAGES_BIT:
-        return {SNAPSHOT_KEY_SEND_MESSAGES: False}
-    return {SNAPSHOT_KEY_SEND_MESSAGES: None}
+    for key, bit in _SCOPE_BITS[scope]:
+        if allow.value & bit:
+            state[key] = True
+        elif deny.value & bit:
+            state[key] = False
+        else:
+            state[key] = None
+    return state
 
 
 def snapshot_from_json(data: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -51,38 +79,53 @@ def snapshot_from_json(data: dict[str, Any] | None) -> dict[str, Any] | None:
     return dict(data)
 
 
-def has_our_send_messages_deny(overwrite: discord.PermissionOverwrite | None) -> bool:
-    """Return True if overwrite explicitly denies send_messages."""
+def has_scope_deny(
+    overwrite: discord.PermissionOverwrite | None,
+    scope: MuteScope,
+) -> bool:
+    """Return True if overwrite explicitly denies any bit managed by ``scope``."""
     if overwrite is None:
         return False
     _allow, deny = overwrite.pair()
-    return bool(deny.value & SEND_MESSAGES_BIT)
+    return bool(deny.value & deny_flag_value_for_scope(scope))
 
 
-def compute_reverted_send_messages_pair(
+def compute_reverted_pair(
     allow: discord.Permissions,
     deny: discord.Permissions,
     snapshot: dict[str, Any] | None,
+    pairs: Sequence[tuple[str, int]],
 ) -> tuple[discord.Permissions, discord.Permissions]:
     """
-    Remove bot send_messages deny and restore prior send_messages state from snapshot.
+    Remove only the given ``pairs`` deny bits and restore their prior state.
 
-    Shared by revert_mute (Member) and revert_mute_by_user_id (left guild).
+    Bits not in ``pairs`` are left untouched so that an independent mute on
+    another scope (or an overlapping scope still active) keeps its deny.
     """
-    new_deny_value = deny.value & ~SEND_MESSAGES_BIT
-    prior = None if snapshot is None else snapshot.get(SNAPSHOT_KEY_SEND_MESSAGES)
+    new_allow_value = allow.value
+    new_deny_value = deny.value
 
-    if prior is True:
-        new_allow_value = allow.value | SEND_MESSAGES_BIT
-        new_deny_value = new_deny_value & ~SEND_MESSAGES_BIT
-    elif prior is False:
-        new_allow_value = allow.value & ~SEND_MESSAGES_BIT
-        new_deny_value = new_deny_value | SEND_MESSAGES_BIT
-    else:
-        new_allow_value = allow.value & ~SEND_MESSAGES_BIT
-        new_deny_value = new_deny_value & ~SEND_MESSAGES_BIT
+    for key, bit in pairs:
+        # Clear both allow/deny for this bit, then restore from snapshot.
+        new_allow_value &= ~bit
+        new_deny_value &= ~bit
+        prior = None if snapshot is None else snapshot.get(key)
+        if prior is True:
+            new_allow_value |= bit
+        elif prior is False:
+            new_deny_value |= bit
 
     return (
         discord.Permissions(new_allow_value),
         discord.Permissions(new_deny_value),
     )
+
+
+def compute_reverted_pair_for_scope(
+    allow: discord.Permissions,
+    deny: discord.Permissions,
+    snapshot: dict[str, Any] | None,
+    scope: MuteScope,
+) -> tuple[discord.Permissions, discord.Permissions]:
+    """Revert all bits managed by ``scope`` (convenience wrapper)."""
+    return compute_reverted_pair(allow, deny, snapshot, _SCOPE_BITS[scope])

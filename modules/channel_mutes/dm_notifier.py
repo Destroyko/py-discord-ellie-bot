@@ -7,6 +7,8 @@ from datetime import datetime
 
 import discord
 
+from modules.channel_mutes.mute_scope import MuteScope, scope_place_phrase
+
 logger = logging.getLogger("ellie_bot")
 
 SERVER_NAME = "Оплот работяг"
@@ -36,17 +38,19 @@ class DmNotifier:
         duration_text: str | None,
         reason: str | None = None,
         is_extended: bool = False,
+        scope: MuteScope = MuteScope.CHAT_ONLY,
     ) -> None:
         """Notify user of new or extended mute."""
         reason_text = reason if reason else "не указана"
         duration_display = duration_text or f"до {_format_expire(expire_at)}"
         channel_display = _channel_link(guild_id, channel_id, channel_name)
+        place = scope_place_phrase(scope, channel_display)
         action_text = "Вам обновили время запрета" if is_extended else "Вы получили запрет"
         title = "Продление наказания" if is_extended else "Наказание"
         color = discord.Color.yellow() if is_extended else discord.Color.red()
 
         description = (
-            f'{action_text} на общение в чате {channel_display} '
+            f'{action_text} на общение {place} '
             f'на сервере "{SERVER_NAME}" продолжительность {duration_display}\n\n'
             "**Причина**\n"
             f"{reason_text}\n\n"
@@ -70,11 +74,13 @@ class DmNotifier:
         guild_id: int,
         channel_name: str,
         channel_id: int,
+        scope: MuteScope = MuteScope.CHAT_ONLY,
     ) -> None:
         """Notify user that channel mute was removed."""
         channel_display = _channel_link(guild_id, channel_id, channel_name)
+        place = scope_place_phrase(scope, channel_display)
         description = (
-            f'С вас снят запрет общаться в чате {channel_display} '
+            f'С вас снят запрет общаться {place} '
             f'на сервере "{SERVER_NAME}".\n\n'
             f"[Правила сервера]({RULES_URL})"
         )

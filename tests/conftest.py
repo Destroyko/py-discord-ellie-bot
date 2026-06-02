@@ -14,6 +14,11 @@ import pytest
 from core.config_loader import AppConfig
 from database.database import Database
 from database.models import ChannelMute
+from modules.channel_mutes.mute_scope import MuteScope
+from modules.channel_mutes.permissions_bits import (
+    SEND_MESSAGES_BIT,
+    SEND_MESSAGES_IN_THREADS_BIT,
+)
 from modules.channel_mutes.repository import ChannelMuteRepository
 
 
@@ -104,13 +109,34 @@ def make_text_channel(
     *,
     channel_id: int = 400,
     guild_id: int = 100,
+    name: str = "general",
 ) -> MagicMock:
     channel = MagicMock(spec=discord.TextChannel)
     channel.id = channel_id
-    channel.name = "general"
+    channel.name = name
+    channel.mention = f"<#{channel_id}>"
     channel.guild = MagicMock(spec=discord.Guild)
     channel.guild.id = guild_id
     return channel
+
+
+def make_thread(
+    *,
+    thread_id: int = 700,
+    guild_id: int = 100,
+    parent: MagicMock | None = None,
+    name: str = "subtopic",
+) -> MagicMock:
+    """discord.Thread stand-in whose parent is a text channel."""
+    parent_channel = parent or make_text_channel(channel_id=400, guild_id=guild_id)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = thread_id
+    thread.name = name
+    thread.mention = f"<#{thread_id}>"
+    thread.parent = parent_channel
+    thread.parent_id = parent_channel.id
+    thread.guild = parent_channel.guild
+    return thread
 
 
 def sample_mute(
@@ -122,6 +148,7 @@ def sample_mute(
     moderator_id: int = 60,
     snapshot: dict[str, Any] | None = None,
     expire_in: timedelta = timedelta(hours=2),
+    scope: MuteScope = MuteScope.CHAT_ONLY,
 ) -> ChannelMute:
     now = datetime.now(timezone.utc)
     return ChannelMute(
@@ -134,13 +161,21 @@ def sample_mute(
         created_at=now,
         expire_at=now + expire_in,
         overwrite_snapshot=snapshot,
+        scope=scope,
     )
 
 
 def overwrite_with_deny() -> discord.PermissionOverwrite:
     return discord.PermissionOverwrite.from_pair(
         discord.Permissions.none(),
-        discord.Permissions(discord.Permissions.send_messages.flag),
+        discord.Permissions(SEND_MESSAGES_BIT),
+    )
+
+
+def overwrite_with_thread_deny() -> discord.PermissionOverwrite:
+    return discord.PermissionOverwrite.from_pair(
+        discord.Permissions.none(),
+        discord.Permissions(SEND_MESSAGES_IN_THREADS_BIT),
     )
 
 

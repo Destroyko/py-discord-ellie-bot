@@ -9,6 +9,7 @@ from enum import Enum
 import discord
 
 from core.config_loader import AppConfig
+from modules.channel_mutes.mute_scope import MuteScope, scope_place_phrase
 
 logger = logging.getLogger("ellie_bot")
 
@@ -45,6 +46,7 @@ class AuditLog:
         target_user_id: int | None = None,
         channel_id: int | None = None,
         moderator_id: int | None = None,
+        scope: MuteScope = MuteScope.CHAT_ONLY,
     ) -> None:
         """Post an audit entry; failures go to file log only."""
         logs_channel = guild.get_channel(self._config.bot_logs_channel_id)
@@ -56,6 +58,7 @@ class AuditLog:
         ch_id = channel_id or (ch.id if ch else 0)
         ch_name = ch.name if isinstance(ch, discord.TextChannel) else str(ch_id)
         channel_display = f"<#{ch_id}>" if ch_id else f"**#{ch_name}**"
+        place = scope_place_phrase(scope, channel_display)
 
         uid = target_user_id or (target.id if target else 0)
         user_mention = f"<@{uid}>"
@@ -65,7 +68,7 @@ class AuditLog:
             actor = guild.me.display_name if guild.me else "Бот"
             line = (
                 f"**{actor}** снял запрет пользователю {user_mention} "
-                f"общаться в чате {channel_display} (истёк срок)"
+                f"общаться {place} (истёк срок)"
             )
         else:
             mod_mention = f"<@{mod_id}>"
@@ -77,7 +80,7 @@ class AuditLog:
                 verb = "снял запрет"
             line = (
                 f"{mod_mention} **{verb}** пользователю {user_mention} "
-                f"общаться в чате {channel_display}"
+                f"общаться {place}"
             )
 
         extra_parts: list[str] = []

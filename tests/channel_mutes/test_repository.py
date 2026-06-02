@@ -8,6 +8,7 @@ import pytest
 
 from database.database import Database
 from database.models import ChannelMute
+from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.repository import (
     ChannelMuteRepository,
     _from_iso,
@@ -41,10 +42,12 @@ class TestRowToMute:
             "created_at": "2026-06-01T10:00:00Z",
             "expire_at": "2026-06-01T12:00:00Z",
             "overwrite_snapshot": '{"send_messages": true}',
+            "scope": "threads_only",
         }
         mute = _row_to_mute(row)
         assert mute.id == 1
         assert mute.overwrite_snapshot == {"send_messages": True}
+        assert mute.scope is MuteScope.THREADS_ONLY
 
     def test_null_snapshot(self) -> None:
         row = {
@@ -57,6 +60,7 @@ class TestRowToMute:
             "created_at": "2026-06-01T10:00:00Z",
             "expire_at": "2026-06-01T12:00:00Z",
             "overwrite_snapshot": None,
+            "scope": "chat_only",
         }
         assert _row_to_mute(row).overwrite_snapshot is None
 
@@ -70,7 +74,7 @@ class TestChannelMuteRepository:
         mute = sample_mute(mute_id=None, snapshot={"send_messages": None})
         saved = repo.insert(mute)
         assert saved.id is not None
-        found = repo.get_by_keys(100, 400, 50)
+        found = repo.get_by_keys(100, 400, 50, MuteScope.CHAT_ONLY)
         assert found is not None
         assert found.id == saved.id
         assert found.overwrite_snapshot == {"send_messages": None}
@@ -112,6 +116,7 @@ class TestChannelMuteRepository:
             created_at=now,
             expire_at=now + timedelta(hours=2),
             overwrite_snapshot=None,
+            scope=MuteScope.CHAT_ONLY,
         )
         expired = ChannelMute(
             id=None,
@@ -123,6 +128,7 @@ class TestChannelMuteRepository:
             created_at=now - timedelta(hours=3),
             expire_at=now - timedelta(hours=1),
             overwrite_snapshot=None,
+            scope=MuteScope.CHAT_ONLY,
         )
         repo.insert(active)
         repo.insert(expired)

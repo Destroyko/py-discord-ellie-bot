@@ -5,7 +5,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from database.migrations import ALL_MIGRATIONS, SCHEMA_VERSION
+from database.migrations import (
+    ALL_MIGRATIONS,
+    CREATE_SCHEMA_VERSION,
+    DROP_CHANNEL_MUTES_TABLE,
+    SCHEMA_VERSION,
+)
 
 
 class Database:
@@ -36,14 +41,29 @@ class Database:
             self._connection = None
 
     def init_db(self) -> None:
-        """Apply migrations and set schema version."""
+        """
+        Apply migrations and set schema version.
+
+        Fresh databases get all tables created. When upgrading from an older
+        schema version, the channel_mutes table is rebuilt cleanly (data reset)
+        because the mute scope feature changes its unique key.
+        """
         conn = self.connect()
+        conn.execute(CREATE_SCHEMA_VERSION)
+        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+        current_version = row["version"] if row is not None else None
+
+        if current_version is not None and current_version < SCHEMA_VERSION:
+            conn.execute(DROP_CHANNEL_MUTES_TABLE)
+
         for sql in ALL_MIGRATIONS:
             conn.execute(sql)
-        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+
         if row is None:
             conn.execute(
                 "INSERT INTO schema_version (version) VALUES (?)",
                 (SCHEMA_VERSION,),
             )
+        elif current_version is not None and current_version < SCHEMA_VERSION:
+            conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
         conn.commit()
