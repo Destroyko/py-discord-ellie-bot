@@ -120,7 +120,11 @@ class ChannelMutesCog(commands.Cog):
             if not allowed:
                 raise TargetNotAllowedError(msg or "Нельзя применить наказание к этому участнику.")
 
-            ok, bot_msg = bot_can_moderate_member(guild, target_member)
+            ok, bot_msg = bot_can_moderate_member(
+                guild,
+                target_member,
+                target_channel,
+            )
             if not ok:
                 raise PermissionDeniedError(bot_msg or "Нельзя выдать наказание.")
             delta = parse_duration(duration)

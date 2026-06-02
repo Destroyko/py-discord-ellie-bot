@@ -88,10 +88,14 @@ def make_member(
 def make_guild_me(
     *,
     manage_channels: bool = True,
+    manage_roles: bool = True,
     top_role_position: int = 10,
 ) -> MagicMock:
     me = MagicMock(spec=discord.Member)
-    me.guild_permissions = SimpleNamespace(manage_channels=manage_channels)
+    me.guild_permissions = SimpleNamespace(
+        manage_channels=manage_channels,
+        manage_roles=manage_roles,
+    )
     me.top_role = FakeRole(top_role_position)
     return me
 

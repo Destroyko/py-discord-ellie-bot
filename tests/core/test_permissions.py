@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -108,12 +109,35 @@ class TestBotCanModerateMember:
         ok, msg = bot_can_moderate_member(guild, target)
         assert ok is True and msg is None
 
-    def test_no_manage_channels(self) -> None:
+    def test_no_guild_permissions(self) -> None:
         guild = MagicMock()
-        guild.me = make_guild_me(manage_channels=False)
+        guild.me = make_guild_me(manage_channels=False, manage_roles=False)
         target = make_member(member_id=2)
         ok, msg = bot_can_moderate_member(guild, target)
-        assert ok is False and msg is not None
+        assert ok is False
+        assert msg == (
+            "Не могу выдать наказание: у бота нет серверных прав: "
+            "«Управление каналами», «Управление ролями»."
+        )
+
+    def test_no_channel_permissions(self) -> None:
+        guild = MagicMock()
+        guild.me = make_guild_me()
+        target = make_member(member_id=2)
+        channel = MagicMock()
+        channel.name = "general"
+        channel.permissions_for = MagicMock(
+            return_value=SimpleNamespace(
+                manage_channels=False,
+                manage_roles=True,
+            )
+        )
+        ok, msg = bot_can_moderate_member(guild, target, channel)
+        assert ok is False
+        assert msg == (
+            "Не могу выдать наказание: у бота нет прав в канале #general: "
+            "«Управление каналами»."
+        )
 
     def test_role_too_low(self) -> None:
         guild = MagicMock()

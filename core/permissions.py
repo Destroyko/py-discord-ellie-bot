@@ -7,6 +7,10 @@ import discord
 from core.config_loader import AppConfig
 
 _MSG_DENIED = "Нельзя применить наказание к этому участнику."
+_PERMISSION_LABELS_RU = {
+    "manage_channels": "Управление каналами",
+    "manage_roles": "Управление ролями",
+}
 
 
 def can_moderate(member: discord.Member, config: AppConfig) -> bool:
@@ -80,6 +84,7 @@ def can_mute_target(
 def bot_can_moderate_member(
     guild: discord.Guild,
     target: discord.Member,
+    channel: discord.abc.GuildChannel | None = None,
 ) -> tuple[bool, str | None]:
     """
     Check whether the bot can apply overwrites to the target.
@@ -90,10 +95,37 @@ def bot_can_moderate_member(
     if me is None:
         return False, "Не могу выдать наказание: бот не найден на сервере."
 
-    if not me.guild_permissions.manage_channels:
-        return False, "Не могу выдать наказание: нет права «Управление каналом»."
+    missing_guild_permissions = _missing_permissions(me.guild_permissions)
+    if missing_guild_permissions:
+        return (
+            False,
+            "Не могу выдать наказание: у бота нет серверных прав: "
+            f"{_format_permissions_list(missing_guild_permissions)}.",
+        )
+
+    if channel is not None:
+        channel_permissions = channel.permissions_for(me)
+        missing_channel_permissions = _missing_permissions(channel_permissions)
+        if missing_channel_permissions:
+            return (
+                False,
+                "Не могу выдать наказание: у бота нет прав в канале "
+                f"#{channel.name}: {_format_permissions_list(missing_channel_permissions)}.",
+            )
 
     if me.top_role <= target.top_role:
         return False, "Не могу выдать наказание: роль бота ниже роли пользователя."
 
     return True, None
+
+
+def _missing_permissions(permissions: discord.Permissions | object) -> list[str]:
+    missing: list[str] = []
+    for key in ("manage_channels", "manage_roles"):
+        if not bool(getattr(permissions, key, False)):
+            missing.append(_PERMISSION_LABELS_RU[key])
+    return missing
+
+
+def _format_permissions_list(permission_names: list[str]) -> str:
+    return ", ".join(f"«{name}»" for name in permission_names)
