@@ -104,11 +104,11 @@ class AuditLog:
             extra_parts.append("Обновлено")
 
         ids_lines = [
-            f"Пользователь: {uid}",
-            f"Чат: {ch_id}",
+            f"-# Пользователь: {uid}",
+            f"-# Чат: {ch_id}",
         ]
         if action != AuditAction.AUTO_UNMUTED:
-            ids_lines.append(f"Модератор: {mod_id}")
+            ids_lines.append(f"-# Модератор: {mod_id}")
         body = line
         if extra_parts:
             body += "\n" + "\n".join(extra_parts)
