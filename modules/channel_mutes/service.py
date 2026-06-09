@@ -21,6 +21,8 @@ from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.overwrite_manager import BitPair, OverwriteManager
 from modules.channel_mutes.permissions_bits import (
     deny_flag_value_for_scope,
+    empty_scope_snapshot,
+    has_full_scope_deny,
     has_scope_deny,
     scope_bit_pairs,
 )
@@ -111,13 +113,21 @@ class ChannelMuteService:
                 scope=scope,
             )
 
-        snapshot = self._capture_snapshot(guild.id, channel, target, scope)
-        try:
-            await self._overwrite.apply_mute(channel, target, scope)
-        except discord.HTTPException as exc:
-            raise DiscordActionError(
-                f"Не могу выдать наказание: {exc.text if hasattr(exc, 'text') else exc}"
-            ) from exc
+        overwrite = channel.overwrites_for(target)
+        adopted = has_scope_deny(overwrite, scope)
+        if adopted:
+            snapshot = empty_scope_snapshot(scope)
+        else:
+            snapshot = self._capture_snapshot(guild.id, channel, target, scope)
+
+        discord_modified = not (adopted and has_full_scope_deny(overwrite, scope))
+        if discord_modified:
+            try:
+                await self._overwrite.apply_mute(channel, target, scope)
+            except discord.HTTPException as exc:
+                raise DiscordActionError(
+                    f"Не могу выдать наказание: {exc.text if hasattr(exc, 'text') else exc}"
+                ) from exc
 
         mute = ChannelMute(
             id=None,
@@ -138,7 +148,8 @@ class ChannelMuteService:
             if self._on_scheduled:
                 await self._on_scheduled(saved.id, saved.expire_at)
         except Exception:
-            await self._rollback_overwrite(guild.id, channel, target, snapshot, scope)
+            if discord_modified:
+                await self._rollback_overwrite(guild.id, channel, target, snapshot, scope)
             raise
 
         await self._dm.send_mute_issued(

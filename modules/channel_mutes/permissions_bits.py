@@ -90,6 +90,23 @@ def has_scope_deny(
     return bool(deny.value & deny_flag_value_for_scope(scope))
 
 
+def has_full_scope_deny(
+    overwrite: discord.PermissionOverwrite | None,
+    scope: MuteScope,
+) -> bool:
+    """Return True if every permission bit in ``scope`` is explicitly denied."""
+    if overwrite is None:
+        return False
+    _allow, deny = overwrite.pair()
+    mask = deny_flag_value_for_scope(scope)
+    return (deny.value & mask) == mask
+
+
+def empty_scope_snapshot(scope: MuteScope) -> dict[str, Any]:
+    """Inherit (null) snapshot for every bit managed by ``scope``."""
+    return {key: None for key, _bit in _SCOPE_BITS[scope]}
+
+
 def compute_reverted_pair(
     allow: discord.Permissions,
     deny: discord.Permissions,

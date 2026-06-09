@@ -13,7 +13,9 @@ from database.models import ChannelMute
 from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.permissions_bits import (
     SEND_MESSAGES_BIT,
+    SEND_MESSAGES_IN_THREADS_BIT,
     SNAPSHOT_KEY_SEND_MESSAGES,
+    SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS,
 )
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.service import ChannelMuteService, UnmuteSource
@@ -23,6 +25,7 @@ from tests.conftest import (
     make_member,
     make_text_channel,
     overwrite_with_deny,
+    overwrite_with_thread_deny,
     overwrite_without_deny,
     sample_mute,
 )
@@ -96,6 +99,7 @@ def _guild_and_channel() -> tuple[MagicMock, MagicMock]:
     guild.name = "Test Guild"
     channel = make_text_channel(channel_id=400, guild_id=100)
     channel.guild = guild
+    channel.overwrites_for = MagicMock(return_value=overwrite_without_deny())
     return guild, channel
 
 
@@ -177,6 +181,156 @@ class TestMuteChannelNew:
         assert call.args[1] is target
         assert call.args[2] == snapshot
         assert call.args[3] == [(SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT)]
+
+
+class TestMuteChannelAdoptManual:
+    async def test_adopt_chat_deny_skips_apply_and_uses_null_snapshot(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        channel.overwrites_for = MagicMock(return_value=overwrite_with_deny())
+
+        saved, extended = await service.mute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=1),
+            duration_text="1h",
+            reason="manual adopt",
+            scope=MuteScope.CHAT_ONLY,
+        )
+
+        assert extended is False
+        assert saved.overwrite_snapshot == {SNAPSHOT_KEY_SEND_MESSAGES: None}
+        overwrite_mgr.read_scope_state.assert_not_called()
+        overwrite_mgr.apply_mute.assert_not_awaited()
+        service._on_scheduled.assert_awaited()  # type: ignore[attr-defined]
+
+    async def test_adopt_thread_deny_skips_apply_and_uses_null_snapshot(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        channel.overwrites_for = MagicMock(return_value=overwrite_with_thread_deny())
+
+        saved, extended = await service.mute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=2),
+            duration_text="2h",
+            reason=None,
+            scope=MuteScope.THREADS_ONLY,
+        )
+
+        assert extended is False
+        assert saved.overwrite_snapshot == {
+            SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS: None,
+        }
+        overwrite_mgr.apply_mute.assert_not_awaited()
+
+    async def test_adopt_partial_scope_applies_missing_bits(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        channel.overwrites_for = MagicMock(return_value=overwrite_with_deny())
+
+        await service.mute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=1),
+            duration_text="1h",
+            reason=None,
+            scope=MuteScope.CHAT_AND_THREADS,
+        )
+
+        overwrite_mgr.apply_mute.assert_awaited_once_with(
+            channel, target, MuteScope.CHAT_AND_THREADS
+        )
+
+    async def test_adopt_db_failure_does_not_rollback_manual_deny(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        channel.overwrites_for = MagicMock(return_value=overwrite_with_deny())
+
+        def failing_insert(_mute: ChannelMute) -> ChannelMute:
+            raise RuntimeError("db down")
+
+        mute_repo.insert = failing_insert  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="db down"):
+            await service.mute_channel(
+                guild=guild,
+                channel=channel,
+                target=target,
+                moderator=mod,
+                duration_delta=timedelta(hours=1),
+                duration_text="1h",
+                reason=None,
+                scope=MuteScope.CHAT_ONLY,
+            )
+
+        overwrite_mgr.rollback_after_failed_db.assert_not_awaited()
+
+    async def test_adopted_mute_unmute_clears_deny(
+        self,
+        service: ChannelMuteService,
+        mute_repo: ChannelMuteRepository,
+        overwrite_mgr: MagicMock,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        channel.overwrites_for = MagicMock(return_value=overwrite_with_thread_deny())
+
+        saved, _ = await service.mute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=1),
+            duration_text="1h",
+            reason=None,
+            scope=MuteScope.THREADS_ONLY,
+        )
+
+        result = await service.unmute_channel(
+            guild=guild,
+            channel=channel,
+            target=target,
+            moderator=mod,
+            scope=MuteScope.THREADS_ONLY,
+            source=UnmuteSource.MANUAL,
+        )
+
+        assert result is True
+        assert mute_repo.get_by_id(saved.id) is None
+        overwrite_mgr.revert_mute.assert_awaited_once()
+        snapshot = overwrite_mgr.revert_mute.await_args.args[2]
+        assert snapshot == {SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS: None}
 
 
 class TestMuteChannelExtend:
