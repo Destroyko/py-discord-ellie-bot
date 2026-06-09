@@ -14,6 +14,7 @@ from core.exceptions import ConfigError
 from core.logger import setup_logging
 from database.database import Database
 from modules.channel_mutes.commands import setup_channel_mutes_cog
+from modules.mention_gif import setup_mention_gif_cog
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.scheduler import MuteScheduler
 from modules.channel_mutes.service import ChannelMuteService
@@ -59,6 +60,7 @@ class EllieBot(commands.Bot):
             self.mute_service,
             self.mute_repository,
         )
+        await setup_mention_gif_cog(self, self.app_config, self.database)
 
         guild = discord.Object(id=self.app_config.guild_id)
         self.tree.copy_global_to(guild=guild)

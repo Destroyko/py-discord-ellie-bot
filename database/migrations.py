@@ -1,6 +1,6 @@
 """SQLite schema definitions."""
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CREATE_CHANNEL_MUTES_TABLE = """
 CREATE TABLE IF NOT EXISTS channel_mutes (
@@ -34,12 +34,23 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 """
 
+CREATE_BOT_META_TABLE = """
+CREATE TABLE IF NOT EXISTS bot_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
 ALL_MIGRATIONS = (
     CREATE_SCHEMA_VERSION,
     CREATE_CHANNEL_MUTES_TABLE,
     CREATE_INDEX_EXPIRE_AT,
     CREATE_INDEX_USER,
+    CREATE_BOT_META_TABLE,
 )
+
+# channel_mutes is rebuilt (data reset) only when upgrading below this version.
+CHANNEL_MUTES_REBUILD_BELOW_VERSION = 2
 
 # Tables rebuilt (with data reset) when upgrading from an older schema version.
 # The mute scope feature changes the channel_mutes unique key, so a clean

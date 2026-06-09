@@ -34,6 +34,9 @@ def app_config() -> AppConfig:
         moderator_commands_channel_id=200,
         bot_logs_channel_id=300,
         moderator_role_ids=(10, 20, 30),
+        mention_gif_enabled=True,
+        mention_gif_cooldown_seconds=600,
+        mention_gifs_dir=Path("assets/mention_gifs"),
     )
 
 

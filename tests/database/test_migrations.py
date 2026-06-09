@@ -55,6 +55,14 @@ def test_schema_version_set(db: Database) -> None:
     assert row["version"] == SCHEMA_VERSION
 
 
+def test_bot_meta_table_exists(db: Database) -> None:
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='bot_meta'"
+    ).fetchone()
+    assert row is not None
+
+
 def test_expire_at_index_exists(db: Database) -> None:
     conn = db.connect()
     row = conn.execute(

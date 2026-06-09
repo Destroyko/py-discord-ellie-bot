@@ -28,6 +28,9 @@ class AppConfig:
     moderator_commands_channel_id: int
     bot_logs_channel_id: int
     moderator_role_ids: tuple[int, ...]
+    mention_gif_enabled: bool
+    mention_gif_cooldown_seconds: int
+    mention_gifs_dir: Path
 
 
 def _require_int(data: dict, key: str) -> int:
@@ -98,6 +101,24 @@ def load_config(
 
     log_level = str(raw.get("log_level", "INFO")).upper()
 
+    mention_gif_enabled = raw.get("mention_gif_enabled", True)
+    if not isinstance(mention_gif_enabled, bool):
+        raise ConfigError("config.yaml: mention_gif_enabled must be a boolean")
+
+    mention_gif_cooldown_seconds = raw.get("mention_gif_cooldown_seconds", 600)
+    if (
+        not isinstance(mention_gif_cooldown_seconds, int)
+        or isinstance(mention_gif_cooldown_seconds, bool)
+        or mention_gif_cooldown_seconds < 1
+    ):
+        raise ConfigError(
+            "config.yaml: mention_gif_cooldown_seconds must be a positive integer"
+        )
+
+    mention_gifs_path = Path(raw.get("mention_gifs_dir", "assets/mention_gifs"))
+    if not mention_gifs_path.is_absolute():
+        mention_gifs_path = PROJECT_ROOT / mention_gifs_path
+
     return AppConfig(
         discord_token=token,
         guild_id=_require_int(raw, "guild_id"),
@@ -107,4 +128,7 @@ def load_config(
         moderator_commands_channel_id=_require_int(raw, "moderator_commands_channel_id"),
         bot_logs_channel_id=_require_int(raw, "bot_logs_channel_id"),
         moderator_role_ids=tuple(role_ids),
+        mention_gif_enabled=mention_gif_enabled,
+        mention_gif_cooldown_seconds=mention_gif_cooldown_seconds,
+        mention_gifs_dir=mention_gifs_path,
     )

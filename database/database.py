@@ -7,6 +7,7 @@ from pathlib import Path
 
 from database.migrations import (
     ALL_MIGRATIONS,
+    CHANNEL_MUTES_REBUILD_BELOW_VERSION,
     CREATE_SCHEMA_VERSION,
     DROP_CHANNEL_MUTES_TABLE,
     SCHEMA_VERSION,
@@ -53,7 +54,10 @@ class Database:
         row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         current_version = row["version"] if row is not None else None
 
-        if current_version is not None and current_version < SCHEMA_VERSION:
+        if (
+            current_version is not None
+            and current_version < CHANNEL_MUTES_REBUILD_BELOW_VERSION
+        ):
             conn.execute(DROP_CHANNEL_MUTES_TABLE)
 
         for sql in ALL_MIGRATIONS:

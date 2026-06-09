@@ -29,7 +29,7 @@ copy .env.example .env
 | Файл | Поля |
 |------|------|
 | `.env` | `DISCORD_TOKEN` |
-| `config/config.yaml` | `guild_id`, `moderator_commands_channel_id`, `bot_logs_channel_id`, `database_path`, `log_level` |
+| `config/config.yaml` | `guild_id`, `moderator_commands_channel_id`, `bot_logs_channel_id`, `database_path`, `log_level`, опционально `mention_gif_*` |
 | `config/roles.yaml` | `role_ids` — ID ролей модераторов **сверху вниз** (старшие → младшие); старшая роль может наказывать младшую |
 
 ## Запуск
@@ -125,6 +125,18 @@ sudo systemctl stop ellie-bot.service
 
 SQLite: режим **WAL**, `busy_timeout` 5 с (см. `database/database.py`).
 
+## Ответ GIF на @упоминание
+
+При `@упоминании` бота в текстовом канале или ветке (кроме каналов логов и бот-команд) бот отвечает **reply** со случайным `.gif` из `assets/mention_gifs/`.
+
+| Параметр в `config.yaml` | По умолчанию | Описание |
+|--------------------------|--------------|----------|
+| `mention_gif_enabled` | `true` | Включить/выключить фичу |
+| `mention_gif_cooldown_seconds` | `600` | Минимальный интервал между ответами на **весь сервер** (хранится в БД) |
+| `mention_gifs_dir` | `assets/mention_gifs` | Папка с файлами `.gif` |
+
+Нужны права бота в канале: просмотр, отправка сообщений, прикрепление файлов. Без прав или на cooldown бот **молчит** (без ответа и без текста).
+
 ## Структура проекта
 
 ```
@@ -132,6 +144,8 @@ bot.py                 # Точка входа
 core/                  # Конфиг, права, ответы, контекст каналов
 database/              # SQLite, модели, миграции
 modules/channel_mutes/ # Mute, scheduler, user_presence, unmute_outcome, audit
+modules/mention_gif/   # Ответ GIF на @упоминание бота
+assets/mention_gifs/   # Пул .gif для ответа (добавьте файлы на сервере)
 config/                # config.yaml, roles.yaml
 logs/                  # Файловые логи (создаётся автоматически)
 ```
@@ -167,6 +181,9 @@ pytest
 - [ ] Ошибки: нет прав, неверный `duration`, пользователь не наказан, команда в лог-канале
 - [ ] Перезапуск бота — активные mutes перепланируются; просроченные снимаются при старте
 - [ ] (Опционально) Отозвать у бота `Manage Channels` на expire — запись в БД остаётся, в файловом логе `Giving up ... keeping DB row`
+- [ ] `@бот` в обычном канале — reply со случайным gif; повтор в течение 10 мин — тишина
+- [ ] `@бот` в лог-канале / бот-командах — без ответа
+- [ ] `mention_gif_enabled: false` — без ответа на упоминания
 
 ## Логи
 
