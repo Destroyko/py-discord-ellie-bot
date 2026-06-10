@@ -17,7 +17,7 @@ from modules.channel_mutes.audit_log import AuditAction, AuditLog
 from modules.channel_mutes.dm_notifier import DmNotifier
 from modules.channel_mutes.duration import compute_expire_at, format_duration
 from modules.channel_mutes.moderator_notifier import ModeratorNotifier
-from modules.channel_mutes.mute_scope import MuteScope
+from modules.channel_mutes.mute_scope import MuteScope, scope_place_phrase
 from modules.channel_mutes.overwrite_manager import BitPair, OverwriteManager
 from modules.channel_mutes.permissions_bits import (
     deny_flag_value_for_scope,
@@ -28,6 +28,11 @@ from modules.channel_mutes.permissions_bits import (
 )
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.unmute_outcome import UnmuteOutcome
+from modules.channel_mutes.unmute_plan import (
+    UnmuteBatchResult,
+    group_records_by_channel,
+    notification_scope_for_channel,
+)
 from modules.channel_mutes.user_presence import UserPresence, resolve_user_presence
 
 logger = logging.getLogger("ellie_bot")
@@ -273,27 +278,151 @@ class ChannelMuteService:
         :returns: True if a mute was active and removed.
         """
         existing = self._repo.get_by_keys(guild.id, channel.id, target.id, scope)
-        overwrite = channel.overwrites_for(target)
-
         if existing is None:
             return False
 
-        # DB record exists; sync Discord (no scope deny -> clean DB, treat as unmuted).
+        removed = await self._unmute_record_core(
+            guild,
+            existing,
+            target,
+            source=source,
+            moderator=moderator,
+        )
+        if not removed:
+            return False
+
+        if source == UnmuteSource.MANUAL and moderator is not None:
+            await self._dm.send_unmute(
+                target,
+                guild_name=guild.name,
+                guild_id=guild.id,
+                channel_name=channel.name,
+                channel_id=channel.id,
+                scope=scope,
+            )
+            await self._moderator_notifier.send_unmute_notice(
+                guild,
+                moderator=moderator,
+                target=target,
+                places=[scope_place_phrase(scope, channel.mention)],
+            )
+
+        return True
+
+    async def unmute_records_batch(
+        self,
+        *,
+        guild: discord.Guild,
+        target: discord.Member,
+        moderator: discord.Member,
+        records: list[ChannelMute],
+    ) -> UnmuteBatchResult:
+        """
+        Remove multiple mute records; grouped DM/mod notice per channel.
+
+        Continues on per-record failure; audit is one entry per removed record.
+        """
+        succeeded: list[ChannelMute] = []
+        failed: list[tuple[ChannelMute, str]] = []
+
+        for record in records:
+            try:
+                removed = await self._unmute_record_core(
+                    guild,
+                    record,
+                    target,
+                    source=UnmuteSource.MANUAL,
+                    moderator=moderator,
+                )
+                if removed:
+                    succeeded.append(record)
+                else:
+                    failed.append((record, "запись не найдена"))
+            except DiscordActionError as exc:
+                failed.append((record, str(exc)))
+            except Exception as exc:
+                logger.exception("Batch unmute failed for record %s", record.id)
+                failed.append((record, str(exc)))
+
+        if succeeded:
+            await self._send_batch_unmute_notifications(
+                guild, target, moderator, succeeded
+            )
+
+        return UnmuteBatchResult(succeeded=succeeded, failed=failed)
+
+    async def _send_batch_unmute_notifications(
+        self,
+        guild: discord.Guild,
+        target: discord.Member,
+        moderator: discord.Member,
+        succeeded: list[ChannelMute],
+    ) -> None:
+        grouped = group_records_by_channel(succeeded)
+        places: list[str] = []
+
+        for channel_id, channel_records in sorted(grouped.items()):
+            channel = await self._resolve_text_channel(guild, channel_id)
+            channel_name = channel.name if channel is not None else str(channel_id)
+            channel_ref = (
+                channel.mention if channel is not None else f"<#{channel_id}>"
+            )
+            removed_scopes = {record.scope for record in channel_records}
+            notify_scope = notification_scope_for_channel(removed_scopes)
+            places.append(scope_place_phrase(notify_scope, channel_ref))
+            await self._dm.send_unmute(
+                target,
+                guild_name=guild.name,
+                guild_id=guild.id,
+                channel_name=channel_name,
+                channel_id=channel_id,
+                scope=notify_scope,
+            )
+
+        await self._moderator_notifier.send_unmute_notice(
+            guild,
+            moderator=moderator,
+            target=target,
+            places=places,
+        )
+
+    async def _unmute_record_core(
+        self,
+        guild: discord.Guild,
+        record: ChannelMute,
+        target: discord.Member,
+        *,
+        source: UnmuteSource,
+        moderator: discord.Member | None = None,
+    ) -> bool:
+        """Remove one DB record and sync Discord. Audit per record when manual."""
+        channel = await self._resolve_text_channel(guild, record.channel_id)
+        if channel is None:
+            await self._drop_unavailable_record(record, guild, target, moderator, source)
+            return True
+
+        scope = record.scope
+        existing = self._repo.get_by_keys(
+            guild.id, channel.id, target.id, scope
+        )
+        if existing is None:
+            return False
+
+        overwrite = channel.overwrites_for(target)
+
         if not has_scope_deny(overwrite, scope):
             self._repo.delete(existing.id)
             if self._on_cancelled and existing.id:
                 await self._on_cancelled(existing.id)
-            if source == UnmuteSource.AUTO:
-                await self._audit.log_action(
-                    AuditAction.AUTO_UNMUTED,
-                    guild=guild,
-                    channel=channel,
-                    target=target,
-                    target_user_id=target.id,
-                    channel_id=channel.id,
-                    scope=scope,
-                )
-            return source == UnmuteSource.MANUAL
+            await self._log_unmute_audit(
+                guild,
+                channel,
+                target,
+                scope,
+                source=source,
+                moderator=moderator,
+            )
+            return True
 
         snapshot = existing.overwrite_snapshot
         pairs = self._revert_pairs(guild.id, channel.id, target.id, scope)
@@ -316,15 +445,51 @@ class ChannelMuteService:
                 logger.exception("Failed to re-apply mute after DB failure")
             raise
 
+        await self._log_unmute_audit(
+            guild,
+            channel,
+            target,
+            scope,
+            source=source,
+            moderator=moderator,
+        )
+        return True
+
+    async def _drop_unavailable_record(
+        self,
+        record: ChannelMute,
+        guild: discord.Guild,
+        target: discord.Member,
+        moderator: discord.Member | None,
+        source: UnmuteSource,
+    ) -> None:
+        """Channel gone — remove DB row; overwrite not reachable."""
+        assert record.id is not None
+        self._repo.delete(record.id)
+        if self._on_cancelled:
+            await self._on_cancelled(record.id)
+        await self._audit.log_action(
+            AuditAction.AUTO_UNMUTED if source == UnmuteSource.AUTO else AuditAction.UNMUTED,
+            guild=guild,
+            channel=None,
+            target=target if source == UnmuteSource.MANUAL else None,
+            moderator=moderator,
+            target_user_id=record.user_id,
+            channel_id=record.channel_id,
+            scope=record.scope,
+        )
+
+    async def _log_unmute_audit(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        target: discord.Member,
+        scope: MuteScope,
+        *,
+        source: UnmuteSource,
+        moderator: discord.Member | None,
+    ) -> None:
         if source == UnmuteSource.MANUAL and moderator is not None:
-            await self._dm.send_unmute(
-                target,
-                guild_name=guild.name,
-                guild_id=guild.id,
-                channel_name=channel.name,
-                channel_id=channel.id,
-                scope=scope,
-            )
             await self._audit.log_action(
                 AuditAction.UNMUTED,
                 guild=guild,
@@ -343,8 +508,6 @@ class ChannelMuteService:
                 channel_id=channel.id,
                 scope=scope,
             )
-
-        return True
 
     async def unmute_by_id(
         self,

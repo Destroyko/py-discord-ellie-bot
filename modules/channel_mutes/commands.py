@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from core.channel_context import (
+    ChannelKind,
+    InvocationContext,
     assert_commands_allowed_in_channel,
     is_ephemeral_mute_command_reply,
     is_ephemeral_reply,
@@ -38,13 +42,24 @@ from modules.channel_mutes.mute_scope import (
     COMMAND_SCOPE_CHAT,
     COMMAND_SCOPE_THREADS,
     MuteScope,
+    scope_from_command_value,
     scope_place_phrase,
 )
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.service import ChannelMuteService
+from modules.channel_mutes.unmute_confirm_view import (
+    UnmuteConfirmView,
+    build_confirm_description,
+    format_batch_summary,
+)
+from modules.channel_mutes.unmute_plan import (
+    collect_unmute_records,
+    unique_channel_ids,
+)
 from modules.channel_mutes.user_resolver import resolve_user
 
 logger = logging.getLogger("ellie_bot")
+_MSK = ZoneInfo("Europe/Moscow")
 
 _SCOPE_CHOICES = [
     app_commands.Choice(name="чат", value=COMMAND_SCOPE_CHAT),
@@ -53,13 +68,38 @@ _SCOPE_CHOICES = [
 ]
 
 
-def _active_mute_target_label(scope: MuteScope, channel_name: str) -> str:
+def _format_expire_msk(expire_at: datetime) -> str:
+    """Format expiry datetime in Moscow time for moderator-facing messages."""
+    if expire_at.tzinfo is None:
+        expire_at = expire_at.replace(tzinfo=timezone.utc)
+    return expire_at.astimezone(_MSK).strftime("%Y-%m-%d %H:%M МСК")
+
+
+def _channel_mention(guild: discord.Guild, channel_id: int) -> str:
+    """Clickable channel reference (<#id>); falls back to id if channel not cached."""
+    ch = guild.get_channel(channel_id)
+    if isinstance(ch, discord.abc.GuildChannel):
+        return ch.mention
+    return f"<#{channel_id}>"
+
+
+def _invocation_parent_channel_id(invocation: InvocationContext) -> int:
+    """Parent text channel id for unmute in the current channel or thread."""
+    channel = invocation.channel
+    if isinstance(channel, discord.Thread):
+        if channel.parent_id is None:
+            raise ValidationError("Не удалось определить родительский канал ветки.")
+        return channel.parent_id
+    return channel.id
+
+
+def _active_mute_target_label(scope: MuteScope, channel_ref: str) -> str:
     """Human-readable target label for /active_mutes, by scope."""
     if scope is MuteScope.THREADS_ONLY:
-        return f"только ветки чата #{channel_name}"
+        return f"только ветки чата {channel_ref}"
     if scope is MuteScope.CHAT_AND_THREADS:
-        return f"чат #{channel_name} и его ветки"
-    return f"#{channel_name}"
+        return f"чат {channel_ref} и его ветки"
+    return channel_ref
 
 
 class ChannelMutesCog(commands.Cog):
@@ -221,7 +261,7 @@ class ChannelMutesCog(commands.Cog):
     )
     @app_commands.describe(
         user="Пользователь",
-        channel="Канал или ветка (обязательно в бот-командах)",
+        channel="Канал или ветка (в бот-командах можно не указывать)",
         scope="Откуда снять: чат / ветки / чат и ветки",
     )
     @app_commands.choices(scope=_SCOPE_CHOICES)
@@ -245,34 +285,101 @@ class ChannelMutesCog(commands.Cog):
 
             await defer_moderator(interaction, invocation_kind=invocation.kind)
 
-            target = resolve_mute_target(invocation, channel, scope, self.config)
-            overwrite_channel = target.overwrite_channel
             target_member = await resolve_user(guild, user)
-            place = scope_place_phrase(target.scope, overwrite_channel.mention)
 
-            existing = self.repository.get_by_keys(
-                guild.id, overwrite_channel.id, target_member.id, target.scope
-            )
-            if existing is None:
-                raise ValidationError(
-                    f"Пользователь не ограничен в общении {place}."
-                )
+            if channel is not None:
+                target = resolve_mute_target(invocation, channel, scope, self.config)
+                overwrite_channel = target.overwrite_channel
+                place = scope_place_phrase(target.scope, overwrite_channel.mention)
 
-            removed = await self.service.unmute_channel(
-                guild=guild,
-                channel=overwrite_channel,
-                target=target_member,
-                moderator=moderator,
-                scope=target.scope,
-            )
-            if not removed:
-                raise ValidationError(
-                    f"Пользователь не ограничен в общении {place}."
+                existing = self.repository.get_by_keys(
+                    guild.id, overwrite_channel.id, target_member.id, target.scope
                 )
+                if existing is None:
+                    raise ValidationError(
+                        f"Пользователь не ограничен в общении {place}."
+                    )
+
+                removed = await self.service.unmute_channel(
+                    guild=guild,
+                    channel=overwrite_channel,
+                    target=target_member,
+                    moderator=moderator,
+                    scope=target.scope,
+                )
+                if not removed:
+                    raise ValidationError(
+                        f"Пользователь не ограничен в общении {place}."
+                    )
+
+                description = f"Запрет снят: {target_member.mention}, {place}"
+                embed_color = discord.Color.green()
+            else:
+                scope_filter = (
+                    scope_from_command_value(scope) if scope is not None else None
+                )
+                channel_id_filter = (
+                    None
+                    if invocation.kind == ChannelKind.MOD_COMMANDS
+                    else _invocation_parent_channel_id(invocation)
+                )
+                records = collect_unmute_records(
+                    self.repository,
+                    guild.id,
+                    target_member.id,
+                    channel_id=channel_id_filter,
+                    scope_filter=scope_filter,
+                )
+                if not records:
+                    raise ValidationError(
+                        "Пользователь не ограничен в общении в выбранных каналах."
+                    )
+
+                if (
+                    len(unique_channel_ids(records)) >= 2
+                    and invocation.kind == ChannelKind.MOD_COMMANDS
+                ):
+                    confirm_embed = discord.Embed(
+                        description=build_confirm_description(
+                            guild, target_member, records
+                        ),
+                        color=discord.Color.gold(),
+                    )
+                    view = UnmuteConfirmView(
+                        self.service,
+                        guild=guild,
+                        target=target_member,
+                        moderator=moderator,
+                        records=records,
+                    )
+                    await interaction.followup.send(
+                        embed=confirm_embed,
+                        view=view,
+                        ephemeral=True,
+                    )
+                    return
+
+                result = await self.service.unmute_records_batch(
+                    guild=guild,
+                    target=target_member,
+                    moderator=moderator,
+                    records=records,
+                )
+                if not result.succeeded and not result.failed:
+                    raise ValidationError(
+                        "Пользователь не ограничен в общении в выбранных каналах."
+                    )
+                description = format_batch_summary(result)
+                if result.failed and not result.succeeded:
+                    embed_color = discord.Color.red()
+                elif result.failed:
+                    embed_color = discord.Color.orange()
+                else:
+                    embed_color = discord.Color.green()
 
             embed = discord.Embed(
-                description=f"Запрет снят: {target_member.mention}, {place}",
-                color=discord.Color.green(),
+                description=description,
+                color=embed_color,
             )
             avatar = moderator.avatar or moderator.default_avatar
             embed.set_author(name=moderator.name, icon_url=avatar.url)
@@ -328,10 +435,9 @@ class ChannelMutesCog(commands.Cog):
                     f"Активные ограничения для {target_member.mention} (`{target_member.id}`):"
                 ]
                 for mute in mutes:
-                    ch = guild.get_channel(mute.channel_id)
-                    ch_name = ch.name if isinstance(ch, discord.TextChannel) else str(mute.channel_id)
-                    label = _active_mute_target_label(mute.scope, ch_name)
-                    exp = mute.expire_at.strftime("%Y-%m-%d %H:%M UTC")
+                    channel_ref = _channel_mention(guild, mute.channel_id)
+                    label = _active_mute_target_label(mute.scope, channel_ref)
+                    exp = _format_expire_msk(mute.expire_at)
                     reason = mute.reason or "—"
                     lines.append(f"• {label} — до {exp}, причина: {reason}")
                 text = "\n".join(lines)

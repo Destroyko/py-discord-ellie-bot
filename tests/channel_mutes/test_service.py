@@ -100,6 +100,7 @@ def _guild_and_channel() -> tuple[MagicMock, MagicMock]:
     channel = make_text_channel(channel_id=400, guild_id=100)
     channel.guild = guild
     channel.overwrites_for = MagicMock(return_value=overwrite_without_deny())
+    guild.get_channel = MagicMock(return_value=channel)
     return guild, channel
 
 
@@ -602,3 +603,94 @@ class TestUnmuteById:
         assert outcome == UnmuteOutcome.DELETED_USER
         assert mute_repo.get_by_id(saved.id) is None
         overwrite_mgr.revert_mute_by_user_id.assert_awaited()
+
+
+class TestUnmuteRecordsBatch:
+    def _dual_scope_overwrite(self) -> discord.PermissionOverwrite:
+        return discord.PermissionOverwrite.from_pair(
+            discord.Permissions.none(),
+            discord.Permissions(SEND_MESSAGES_BIT | SEND_MESSAGES_IN_THREADS_BIT),
+        )
+
+    async def test_same_channel_both_scopes_one_dm_with_chat_and_threads(
+        self,
+        service: ChannelMuteService,
+        mute_repo: ChannelMuteRepository,
+        dm: AsyncMock,
+        mod_notifier: AsyncMock,
+    ) -> None:
+        guild, channel = _guild_and_channel()
+        target = make_member(member_id=50)
+        moderator = make_member(member_id=60)
+        mute_repo.insert(sample_mute(mute_id=None, scope=MuteScope.CHAT_ONLY))
+        mute_repo.insert(
+            sample_mute(
+                mute_id=None,
+                scope=MuteScope.THREADS_ONLY,
+                snapshot={SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS: None},
+            )
+        )
+        channel.overwrites_for = MagicMock(return_value=self._dual_scope_overwrite())
+        records = [
+            mute_repo.get_by_keys(100, 400, 50, MuteScope.CHAT_ONLY),
+            mute_repo.get_by_keys(100, 400, 50, MuteScope.THREADS_ONLY),
+        ]
+        assert all(records)
+
+        result = await service.unmute_records_batch(
+            guild=guild,
+            target=target,
+            moderator=moderator,
+            records=[r for r in records if r is not None],
+        )
+
+        assert len(result.succeeded) == 2
+        assert not result.failed
+        dm.send_unmute.assert_awaited_once()
+        assert dm.send_unmute.await_args.kwargs["scope"] is MuteScope.CHAT_AND_THREADS
+        mod_notifier.send_unmute_notice.assert_awaited_once()
+        places = mod_notifier.send_unmute_notice.await_args.kwargs["places"]
+        assert len(places) == 1
+
+    async def test_two_channels_two_dms_one_mod_notice(
+        self,
+        service: ChannelMuteService,
+        mute_repo: ChannelMuteRepository,
+        dm: AsyncMock,
+        mod_notifier: AsyncMock,
+    ) -> None:
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = 100
+        guild.name = "Test Guild"
+        channel_a = make_text_channel(channel_id=400, name="alpha")
+        channel_b = make_text_channel(channel_id=401, name="beta")
+        channel_a.guild = guild
+        channel_b.guild = guild
+        deny = overwrite_with_deny()
+        channel_a.overwrites_for = MagicMock(return_value=deny)
+        channel_b.overwrites_for = MagicMock(return_value=deny)
+        guild.get_channel = MagicMock(
+            side_effect=lambda cid: channel_a if cid == 400 else channel_b
+        )
+
+        target = make_member(member_id=50)
+        moderator = make_member(member_id=60)
+        mute_repo.insert(sample_mute(mute_id=None, channel_id=400))
+        mute_repo.insert(sample_mute(mute_id=None, channel_id=401))
+        records = [
+            mute_repo.get_by_keys(100, 400, 50, MuteScope.CHAT_ONLY),
+            mute_repo.get_by_keys(100, 401, 50, MuteScope.CHAT_ONLY),
+        ]
+
+        result = await service.unmute_records_batch(
+            guild=guild,
+            target=target,
+            moderator=moderator,
+            records=[r for r in records if r is not None],
+        )
+
+        assert len(result.succeeded) == 2
+        assert dm.send_unmute.await_count == 2
+        mod_notifier.send_unmute_notice.assert_awaited_once()
+        places = mod_notifier.send_unmute_notice.await_args.kwargs["places"]
+        assert len(places) == 2
