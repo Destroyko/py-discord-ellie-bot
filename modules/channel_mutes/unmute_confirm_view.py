@@ -101,20 +101,20 @@ class UnmuteConfirmView(discord.ui.View):
         _button: discord.ui.Button,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
-        result = await self._service.unmute_records_batch(
+        await self._service.unmute_records_batch(
             guild=self._guild,
             target=self._target,
             moderator=self._moderator,
             records=self._records,
         )
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-        embed = discord.Embed(
-            description=format_batch_summary(result),
-            color=discord.Color.green() if result.succeeded else discord.Color.red(),
-        )
-        await interaction.edit_original_response(embed=embed, view=self)
+        self.stop()
+        try:
+            await interaction.delete_original_response()
+        except discord.HTTPException:
+            logger.warning(
+                "Could not delete bulk unmute confirmation message",
+                exc_info=True,
+            )
 
     @discord.ui.button(label="Отмена", style=discord.ButtonStyle.danger)
     async def cancel(
