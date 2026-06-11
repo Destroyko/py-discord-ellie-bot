@@ -481,16 +481,25 @@ class ChannelMutesCog(commands.Cog):
                 config=self.config,
                 invocation_kind=invocation.kind,
                 success=True,
+                ephemeral=True,
             )
         except ValidationError as exc:
             if inv_kind is not None:
                 await reply_validation(
-                    interaction, exc.message, config=self.config, invocation_kind=inv_kind
+                    interaction,
+                    exc.message,
+                    config=self.config,
+                    invocation_kind=inv_kind,
+                    ephemeral=True,
                 )
         except Exception as exc:
             if inv_kind is not None:
                 await reply_internal_error(
-                    interaction, exc, config=self.config, invocation_kind=inv_kind
+                    interaction,
+                    exc,
+                    config=self.config,
+                    invocation_kind=inv_kind,
+                    ephemeral=True,
                 )
 
 
