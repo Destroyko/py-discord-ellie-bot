@@ -49,13 +49,13 @@ class ModeratorNotifier:
                 else f"на {duration_text}"
             )
             text = (
-                f"{target.mention} перемючен {place} {duration_line}\n"
+                f"{target.mention} перемьючен {place} {duration_line}\n"
                 "причина:\n"
                 f"{reason_text}"
             )
         else:
             text = (
-                f"{target.mention} замючен {place}\n"
+                f"{target.mention} замьючен {place}\n"
                 f"на {duration_text}\n"
                 "причина:\n"
                 f"{reason_text}"
