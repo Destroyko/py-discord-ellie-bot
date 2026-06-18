@@ -12,16 +12,22 @@ from core.config_loader import AppConfig
 from database.models import ChannelMute
 from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.permissions_bits import (
+    CREATE_PUBLIC_THREADS_BIT,
     SEND_MESSAGES_BIT,
     SEND_MESSAGES_IN_THREADS_BIT,
+    SNAPSHOT_KEY_APPLIED,
+    SNAPSHOT_KEY_CREATE_PUBLIC_THREADS,
     SNAPSHOT_KEY_SEND_MESSAGES,
     SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS,
+    applied_bit_pairs,
+    scope_bit_pairs,
 )
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.service import ChannelMuteService, UnmuteSource
 from modules.channel_mutes.unmute_outcome import UnmuteOutcome
 from modules.channel_mutes.user_presence import UserPresence
 from tests.conftest import (
+    make_forum_channel,
     make_member,
     make_text_channel,
     overwrite_with_deny,
@@ -43,9 +49,17 @@ def bot() -> MagicMock:
 
 @pytest.fixture
 def overwrite_mgr() -> MagicMock:
+    async def _apply(
+        _channel: object,
+        _member: object,
+        scope: MuteScope,
+        **_k: object,
+    ) -> list:
+        return list(scope_bit_pairs(scope))
+
     mgr = MagicMock()
     mgr.read_scope_state = MagicMock(return_value={SNAPSHOT_KEY_SEND_MESSAGES: None})
-    mgr.apply_mute = AsyncMock()
+    mgr.apply_mute = AsyncMock(side_effect=_apply)
     mgr.revert_mute = AsyncMock()
     mgr.rollback_after_failed_db = AsyncMock()
     mgr.revert_mute_by_user_id = AsyncMock()
@@ -120,8 +134,9 @@ class TestMuteChannelNew:
             calls.append("snapshot")
             return {SNAPSHOT_KEY_SEND_MESSAGES: None}
 
-        async def track_apply(*_a: object, **_k: object) -> None:
+        async def track_apply(*_a: object, **_k: object) -> list:
             calls.append("apply")
+            return [(SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT)]
 
         overwrite_mgr.read_scope_state = track_read
         overwrite_mgr.apply_mute = track_apply
@@ -180,8 +195,8 @@ class TestMuteChannelNew:
         call = overwrite_mgr.rollback_after_failed_db.await_args
         assert call.args[0] is channel
         assert call.args[1] is target
-        assert call.args[2] == snapshot
         assert call.args[3] == [(SNAPSHOT_KEY_SEND_MESSAGES, SEND_MESSAGES_BIT)]
+        assert SNAPSHOT_KEY_APPLIED in call.args[2]
 
 
 class TestMuteChannelAdoptManual:
@@ -694,3 +709,140 @@ class TestUnmuteRecordsBatch:
         mod_notifier.send_unmute_notice.assert_awaited_once()
         places = mod_notifier.send_unmute_notice.await_args.kwargs["places"]
         assert len(places) == 2
+
+
+class TestForumMute:
+    async def test_forum_mute_stores_applied_snapshot(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = 100
+        guild.name = "Test Guild"
+        forum = make_forum_channel(channel_id=600, guild_id=100)
+        forum.guild = guild
+        forum.overwrites_for = MagicMock(return_value=overwrite_without_deny())
+        guild.get_channel = MagicMock(return_value=forum)
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+
+        async def partial_forum_apply(_ch: object, _mem: object, scope: MuteScope) -> list:
+            assert scope is MuteScope.FORUM
+            return [(SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS, SEND_MESSAGES_IN_THREADS_BIT)]
+
+        overwrite_mgr.apply_mute = AsyncMock(side_effect=partial_forum_apply)
+
+        saved, extended = await service.mute_channel(
+            guild=guild,
+            channel=forum,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=1),
+            duration_text="1h",
+            reason="forum",
+            scope=MuteScope.FORUM,
+        )
+
+        assert extended is False
+        assert saved.scope is MuteScope.FORUM
+        assert saved.overwrite_snapshot is not None
+        assert saved.overwrite_snapshot[SNAPSHOT_KEY_APPLIED] == [
+            SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS
+        ]
+
+    async def test_extend_retries_forum_create(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = 100
+        guild.name = "Test Guild"
+        forum = make_forum_channel(channel_id=600, guild_id=100)
+        forum.guild = guild
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        existing = sample_mute(
+            mute_id=None,
+            channel_id=600,
+            scope=MuteScope.FORUM,
+            snapshot={
+                SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS: None,
+                SNAPSHOT_KEY_APPLIED: [SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS],
+            },
+        )
+        inserted = mute_repo.insert(existing)
+
+        async def add_create_on_extend(_ch: object, _mem: object, scope: MuteScope) -> list:
+            return list(scope_bit_pairs(scope))
+
+        overwrite_mgr.apply_mute = AsyncMock(side_effect=add_create_on_extend)
+
+        updated, extended = await service.mute_channel(
+            guild=guild,
+            channel=forum,
+            target=target,
+            moderator=mod,
+            duration_delta=timedelta(hours=2),
+            duration_text="2h",
+            reason="extend",
+            scope=MuteScope.FORUM,
+        )
+
+        assert extended is True
+        assert updated.id == inserted.id
+        overwrite_mgr.apply_mute.assert_awaited_once()
+        refreshed = mute_repo.get_by_id(inserted.id)
+        assert refreshed is not None
+        assert SNAPSHOT_KEY_CREATE_PUBLIC_THREADS in (
+            refreshed.overwrite_snapshot or {}
+        ).get(SNAPSHOT_KEY_APPLIED, [])
+
+    async def test_forum_unmute_reverts_only_applied_bits(
+        self,
+        service: ChannelMuteService,
+        overwrite_mgr: MagicMock,
+        mute_repo: ChannelMuteRepository,
+    ) -> None:
+        guild = MagicMock(spec=discord.Guild)
+        guild.id = 100
+        forum = make_forum_channel(channel_id=600, guild_id=100)
+        forum.guild = guild
+        forum.overwrites_for = MagicMock(
+            return_value=discord.PermissionOverwrite.from_pair(
+                discord.Permissions.none(),
+                discord.Permissions(SEND_MESSAGES_IN_THREADS_BIT),
+            )
+        )
+        guild.get_channel = MagicMock(return_value=forum)
+        target = make_member(member_id=50)
+        mod = make_member(member_id=60, role_ids=(10,))
+        mute_repo.insert(
+            sample_mute(
+                mute_id=None,
+                channel_id=600,
+                scope=MuteScope.FORUM,
+                snapshot={
+                    SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS: None,
+                    SNAPSHOT_KEY_APPLIED: [SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS],
+                },
+            )
+        )
+
+        removed = await service.unmute_channel(
+            guild=guild,
+            channel=forum,
+            target=target,
+            moderator=mod,
+            scope=MuteScope.FORUM,
+        )
+
+        assert removed is True
+        overwrite_mgr.revert_mute.assert_awaited_once()
+        pairs = overwrite_mgr.revert_mute.await_args.args[3]
+        assert pairs == [
+            (SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS, SEND_MESSAGES_IN_THREADS_BIT)
+        ]

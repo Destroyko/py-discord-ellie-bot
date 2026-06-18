@@ -56,7 +56,10 @@ class AuditLog:
 
         ch = channel
         ch_id = channel_id or (ch.id if ch else 0)
-        ch_name = ch.name if isinstance(ch, discord.TextChannel) else str(ch_id)
+        if isinstance(ch, (discord.TextChannel, discord.ForumChannel)):
+            ch_name = ch.name
+        else:
+            ch_name = str(ch_id)
         channel_display = f"<#{ch_id}>" if ch_id else f"**#{ch_name}**"
         place = scope_place_phrase(scope, channel_display)
 

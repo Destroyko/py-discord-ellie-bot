@@ -9,10 +9,14 @@ import pytest
 
 from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.permissions_bits import (
+    CREATE_PUBLIC_THREADS_BIT,
     SEND_MESSAGES_BIT,
     SEND_MESSAGES_IN_THREADS_BIT,
+    SNAPSHOT_KEY_APPLIED,
+    SNAPSHOT_KEY_CREATE_PUBLIC_THREADS,
     SNAPSHOT_KEY_SEND_MESSAGES,
     SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS,
+    applied_bit_pairs,
     capture_state_for_scope,
     compute_reverted_pair,
     compute_reverted_pair_for_scope,
@@ -42,6 +46,13 @@ class TestDenyFlagValueForScope:
     def test_chat_and_threads(self) -> None:
         assert deny_flag_value_for_scope(MuteScope.CHAT_AND_THREADS) == (
             SEND_MESSAGES_BIT | SEND_MESSAGES_IN_THREADS_BIT
+        )
+
+    def test_forum(self) -> None:
+        from modules.channel_mutes.permissions_bits import CREATE_PUBLIC_THREADS_BIT
+
+        assert deny_flag_value_for_scope(MuteScope.FORUM) == (
+            SEND_MESSAGES_IN_THREADS_BIT | CREATE_PUBLIC_THREADS_BIT
         )
 
 
@@ -136,3 +147,20 @@ class TestComputeRevertedPairIndependence:
         new_allow, new_deny = compute_reverted_pair(allow, deny, None, [])
         assert new_allow.value == 0
         assert new_deny.value == SEND_MESSAGES_BIT
+
+
+class TestAppliedBitPairs:
+    def test_uses_applied_keys_when_present(self) -> None:
+        snapshot = {
+            SNAPSHOT_KEY_APPLIED: [SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS],
+            SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS: None,
+        }
+        pairs = applied_bit_pairs(MuteScope.FORUM, snapshot)
+        assert pairs == [
+            (SNAPSHOT_KEY_SEND_MESSAGES_IN_THREADS, SEND_MESSAGES_IN_THREADS_BIT)
+        ]
+
+    def test_fallback_to_all_scope_bits(self) -> None:
+        pairs = applied_bit_pairs(MuteScope.FORUM, None)
+        assert len(pairs) == 2
+        assert (SNAPSHOT_KEY_CREATE_PUBLIC_THREADS, CREATE_PUBLIC_THREADS_BIT) in pairs

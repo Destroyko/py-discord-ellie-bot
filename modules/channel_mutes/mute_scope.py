@@ -13,6 +13,7 @@ class MuteScope(Enum):
     CHAT_ONLY = "chat_only"
     THREADS_ONLY = "threads_only"
     CHAT_AND_THREADS = "chat_and_threads"
+    FORUM = "forum"
 
     @property
     def affects_chat(self) -> bool:
@@ -22,7 +23,11 @@ class MuteScope(Enum):
     @property
     def affects_threads(self) -> bool:
         """Whether this scope denies sending in the channel's threads."""
-        return self in (MuteScope.THREADS_ONLY, MuteScope.CHAT_AND_THREADS)
+        return self in (
+            MuteScope.THREADS_ONLY,
+            MuteScope.CHAT_AND_THREADS,
+            MuteScope.FORUM,
+        )
 
 
 # Command-level option values (what the moderator picks).
@@ -75,4 +80,6 @@ def scope_place_phrase(scope: MuteScope, channel_ref: str) -> str:
         return f"в чате {channel_ref}"
     if scope is MuteScope.THREADS_ONLY:
         return f"в ветках чата {channel_ref}"
+    if scope is MuteScope.FORUM:
+        return f"во всех палатах форума {channel_ref}"
     return f"в чате {channel_ref} и его ветках"

@@ -20,7 +20,7 @@ from core.channel_context import (
 from core.config_loader import AppConfig
 from core.exceptions import ValidationError
 from modules.channel_mutes.mute_scope import MuteScope
-from tests.conftest import app_config, make_text_channel, make_thread
+from tests.conftest import app_config, make_forum_channel, make_forum_thread, make_text_channel, make_thread
 
 
 @pytest.fixture
@@ -123,15 +123,30 @@ class TestResolveMuteTarget:
         with pytest.raises(ValidationError, match="наказание"):
             resolve_mute_target(inv, log_ch, None, config)
 
-    def test_forum_thread_rejected(self, config: AppConfig) -> None:
-        forum_parent = MagicMock(spec=discord.ForumChannel)
-        forum_parent.id = 600
-        thread = MagicMock(spec=discord.Thread)
-        thread.parent = forum_parent
-        thread.parent_id = 600
+    def test_forum_thread_resolves_to_forum_scope(self, config: AppConfig) -> None:
+        forum = make_forum_channel(channel_id=600)
+        thread = make_forum_thread(thread_id=901, parent=forum)
         inv = InvocationContext(kind=ChannelKind.PUBLIC, channel=thread)
-        with pytest.raises(ValidationError, match="форум"):
-            resolve_mute_target(inv, None, None, config)
+        target = resolve_mute_target(inv, None, "chat", config)
+        assert target.overwrite_channel is forum
+        assert target.scope is MuteScope.FORUM
+        assert target.is_forum is True
+
+    def test_forum_channel_param_in_mod_commands(self, config: AppConfig) -> None:
+        mod_ch = make_text_channel(channel_id=config.moderator_commands_channel_id)
+        forum = make_forum_channel(channel_id=600)
+        inv = InvocationContext(kind=ChannelKind.MOD_COMMANDS, channel=mod_ch)
+        target = resolve_mute_target(inv, forum, "threads", config)
+        assert target.overwrite_channel is forum
+        assert target.scope is MuteScope.FORUM
+
+    def test_forum_channel_invocation_rejected(self, config: AppConfig) -> None:
+        forum = make_forum_channel(channel_id=600)
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.guild = MagicMock()
+        interaction.channel = forum
+        with pytest.raises(ValidationError, match="текстовых"):
+            resolve_invocation_channel(interaction, config)
 
 
 class TestResolveInvocationChannel:

@@ -142,6 +142,41 @@ def make_thread(
     return thread
 
 
+def make_forum_channel(
+    *,
+    channel_id: int = 600,
+    guild_id: int = 100,
+    name: str = "palaty",
+) -> MagicMock:
+    channel = MagicMock(spec=discord.ForumChannel)
+    channel.id = channel_id
+    channel.name = name
+    channel.mention = f"<#{channel_id}>"
+    channel.guild = MagicMock(spec=discord.Guild)
+    channel.guild.id = guild_id
+    channel.overwrites_for = MagicMock(return_value=discord.PermissionOverwrite())
+    channel.set_permissions = AsyncMock()
+    return channel
+
+
+def make_forum_thread(
+    *,
+    thread_id: int = 701,
+    guild_id: int = 100,
+    parent: MagicMock | None = None,
+    name: str = "ward",
+) -> MagicMock:
+    parent_forum = parent or make_forum_channel(channel_id=600, guild_id=guild_id)
+    thread = MagicMock(spec=discord.Thread)
+    thread.id = thread_id
+    thread.name = name
+    thread.mention = f"<#{thread_id}>"
+    thread.parent = parent_forum
+    thread.parent_id = parent_forum.id
+    thread.guild = parent_forum.guild
+    return thread
+
+
 def sample_mute(
     *,
     mute_id: int | None = 1,

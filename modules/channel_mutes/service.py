@@ -10,6 +10,7 @@ from typing import Any
 
 import discord
 
+from core.channel_context import MuteChannel
 from core.config_loader import AppConfig
 from core.exceptions import DiscordActionError, ValidationError
 from database.models import ChannelMute
@@ -20,11 +21,14 @@ from modules.channel_mutes.moderator_notifier import ModeratorNotifier
 from modules.channel_mutes.mute_scope import MuteScope, scope_place_phrase
 from modules.channel_mutes.overwrite_manager import BitPair, OverwriteManager
 from modules.channel_mutes.permissions_bits import (
+    SNAPSHOT_KEY_CREATE_PUBLIC_THREADS,
+    applied_bit_pairs,
+    applied_keys_from_snapshot,
     deny_flag_value_for_scope,
     empty_scope_snapshot,
-    has_full_scope_deny,
-    has_scope_deny,
-    scope_bit_pairs,
+    has_full_scope_deny_for_applied,
+    has_scope_deny_for_applied,
+    merge_applied_into_snapshot,
 )
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.unmute_outcome import UnmuteOutcome
@@ -84,7 +88,7 @@ class ChannelMuteService:
         self,
         *,
         guild: discord.Guild,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         target: discord.Member,
         moderator: discord.Member,
         duration_delta: Any,
@@ -96,7 +100,7 @@ class ChannelMuteService:
         Apply or extend a channel mute for the given scope.
 
         ``channel`` is the channel whose overwrites are edited (the parent text
-        channel when the moderator targeted a thread).
+        or forum channel when the moderator targeted a thread).
 
         :returns: (mute record, was_extended)
         """
@@ -119,20 +123,26 @@ class ChannelMuteService:
             )
 
         overwrite = channel.overwrites_for(target)
-        adopted = has_scope_deny(overwrite, scope)
+        adopted = has_scope_deny_for_applied(overwrite, scope, None)
         if adopted:
             snapshot = empty_scope_snapshot(scope)
         else:
             snapshot = self._capture_snapshot(guild.id, channel, target, scope)
 
-        discord_modified = not (adopted and has_full_scope_deny(overwrite, scope))
+        discord_modified = not (
+            adopted and has_full_scope_deny_for_applied(overwrite, scope, None)
+        )
+        applied_pairs: list[BitPair] = []
         if discord_modified:
             try:
-                await self._overwrite.apply_mute(channel, target, scope)
+                applied_pairs = await self._overwrite.apply_mute(channel, target, scope)
+            except DiscordActionError:
+                raise
             except discord.HTTPException as exc:
                 raise DiscordActionError(
                     f"Не могу выдать наказание: {exc.text if hasattr(exc, 'text') else exc}"
                 ) from exc
+            snapshot = merge_applied_into_snapshot(snapshot, applied_pairs)
 
         mute = ChannelMute(
             id=None,
@@ -153,8 +163,10 @@ class ChannelMuteService:
             if self._on_scheduled:
                 await self._on_scheduled(saved.id, saved.expire_at)
         except Exception:
-            if discord_modified:
-                await self._rollback_overwrite(guild.id, channel, target, snapshot, scope)
+            if discord_modified and applied_pairs:
+                await self._overwrite.rollback_after_failed_db(
+                    channel, target, snapshot, applied_pairs
+                )
             raise
 
         await self._dm.send_mute_issued(
@@ -195,7 +207,7 @@ class ChannelMuteService:
         *,
         existing: ChannelMute,
         guild: discord.Guild,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         target: discord.Member,
         moderator: discord.Member,
         expire_at: datetime,
@@ -216,6 +228,11 @@ class ChannelMuteService:
             raise ValidationError("Не удалось обновить наказание.")
 
         assert updated.id is not None
+
+        if scope is MuteScope.FORUM:
+            updated = await self._retry_forum_create_on_extend(
+                updated, channel, target
+            )
 
         if self._on_cancelled:
             await self._on_cancelled(existing.id)
@@ -262,11 +279,38 @@ class ChannelMuteService:
         )
         return updated, True
 
+    async def _retry_forum_create_on_extend(
+        self,
+        record: ChannelMute,
+        channel: MuteChannel,
+        target: discord.Member,
+    ) -> ChannelMute:
+        """Best-effort apply create_public_threads if it was skipped before."""
+        assert record.id is not None
+        applied_keys = applied_keys_from_snapshot(record.overwrite_snapshot) or []
+        if SNAPSHOT_KEY_CREATE_PUBLIC_THREADS in applied_keys:
+            return record
+        base_snapshot = record.overwrite_snapshot or empty_scope_snapshot(MuteScope.FORUM)
+        try:
+            new_pairs = await self._overwrite.apply_mute(
+                channel, target, MuteScope.FORUM
+            )
+        except (DiscordActionError, discord.HTTPException):
+            logger.warning(
+                "Forum create_public_threads retry on extend failed for user %s in %s",
+                target.id,
+                channel.id,
+            )
+            return record
+        merged = merge_applied_into_snapshot(base_snapshot, new_pairs)
+        refreshed = self._repo.update_snapshot(record.id, merged)
+        return refreshed or record
+
     async def unmute_channel(
         self,
         *,
         guild: discord.Guild,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         target: discord.Member,
         moderator: discord.Member | None,
         scope: MuteScope = MuteScope.CHAT_ONLY,
@@ -362,7 +406,7 @@ class ChannelMuteService:
         places: list[str] = []
 
         for channel_id, channel_records in sorted(grouped.items()):
-            channel = await self._resolve_text_channel(guild, channel_id)
+            channel = await self._resolve_mute_channel(guild, channel_id)
             channel_name = channel.name if channel is not None else str(channel_id)
             channel_ref = (
                 channel.mention if channel is not None else f"<#{channel_id}>"
@@ -396,7 +440,7 @@ class ChannelMuteService:
         moderator: discord.Member | None = None,
     ) -> bool:
         """Remove one DB record and sync Discord. Audit per record when manual."""
-        channel = await self._resolve_text_channel(guild, record.channel_id)
+        channel = await self._resolve_mute_channel(guild, record.channel_id)
         if channel is None:
             await self._drop_unavailable_record(record, guild, target, moderator, source)
             return True
@@ -410,7 +454,7 @@ class ChannelMuteService:
 
         overwrite = channel.overwrites_for(target)
 
-        if not has_scope_deny(overwrite, scope):
+        if not has_scope_deny_for_applied(overwrite, scope, existing.overwrite_snapshot):
             self._repo.delete(existing.id)
             if self._on_cancelled and existing.id:
                 await self._on_cancelled(existing.id)
@@ -425,7 +469,13 @@ class ChannelMuteService:
             return True
 
         snapshot = existing.overwrite_snapshot
-        pairs = self._revert_pairs(guild.id, channel.id, target.id, scope)
+        pairs = self._revert_pairs(
+            guild.id,
+            channel.id,
+            target.id,
+            scope,
+            snapshot=snapshot,
+        )
         try:
             if pairs:
                 await self._overwrite.revert_mute(channel, target, snapshot, pairs)
@@ -482,7 +532,7 @@ class ChannelMuteService:
     async def _log_unmute_audit(
         self,
         guild: discord.Guild,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         target: discord.Member,
         scope: MuteScope,
         *,
@@ -524,7 +574,7 @@ class ChannelMuteService:
         if guild is None:
             return UnmuteOutcome.RETRY
 
-        channel = await self._resolve_text_channel(guild, record.channel_id)
+        channel = await self._resolve_mute_channel(guild, record.channel_id)
         if channel is None:
             return await self._finalize_channel_unavailable(record, guild)
 
@@ -568,13 +618,13 @@ class ChannelMuteService:
             logger.warning("Could not fetch guild %s for auto-unmute", guild_id)
             return None
 
-    async def _resolve_text_channel(
+    async def _resolve_mute_channel(
         self,
         guild: discord.Guild,
         channel_id: int,
-    ) -> discord.TextChannel | None:
+    ) -> MuteChannel | None:
         channel = guild.get_channel(channel_id)
-        if isinstance(channel, discord.TextChannel):
+        if isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
             return channel
         try:
             fetched = await guild.fetch_channel(channel_id)
@@ -585,7 +635,7 @@ class ChannelMuteService:
                 guild.id,
             )
             return None
-        if isinstance(fetched, discord.TextChannel):
+        if isinstance(fetched, (discord.TextChannel, discord.ForumChannel)):
             return fetched
         return None
 
@@ -614,7 +664,7 @@ class ChannelMuteService:
         self,
         record: ChannelMute,
         guild: discord.Guild,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         *,
         member: discord.Member | None,
     ) -> UnmuteOutcome:
@@ -627,7 +677,7 @@ class ChannelMuteService:
         overwrite = channel.overwrites_for(lookup)
         snapshot = record.overwrite_snapshot
 
-        if not has_scope_deny(overwrite, record.scope):
+        if not has_scope_deny_for_applied(overwrite, record.scope, snapshot):
             self._repo.delete(record.id)
             if self._on_cancelled:
                 await self._on_cancelled(record.id)
@@ -642,7 +692,13 @@ class ChannelMuteService:
             )
             return UnmuteOutcome.COMPLETED
 
-        pairs = self._revert_pairs(guild.id, channel.id, user_id, record.scope)
+        pairs = self._revert_pairs(
+            guild.id,
+            channel.id,
+            user_id,
+            record.scope,
+            snapshot=snapshot,
+        )
         try:
             if pairs:
                 if member is not None:
@@ -687,14 +743,20 @@ class ChannelMuteService:
     async def _cleanup_deleted_user(
         self,
         record: ChannelMute,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
     ) -> UnmuteOutcome:
         """Remove DB row for deleted account; best-effort revert without audit."""
         assert record.id is not None
         overwrite = channel.overwrites_for(discord.Object(id=record.user_id))
-        if has_scope_deny(overwrite, record.scope):
+        if has_scope_deny_for_applied(
+            overwrite, record.scope, record.overwrite_snapshot
+        ):
             pairs = self._revert_pairs(
-                record.guild_id, channel.id, record.user_id, record.scope
+                record.guild_id,
+                channel.id,
+                record.user_id,
+                record.scope,
+                snapshot=record.overwrite_snapshot,
             )
             if pairs:
                 try:
@@ -725,7 +787,7 @@ class ChannelMuteService:
     def _capture_snapshot(
         self,
         guild_id: int,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         target: discord.Member,
         scope: MuteScope,
     ) -> dict[str, Any]:
@@ -743,8 +805,9 @@ class ChannelMuteService:
             if record.scope == scope or record.overwrite_snapshot is None:
                 continue
             for key, value in record.overwrite_snapshot.items():
-                if key in state:
-                    state[key] = value
+                if key.startswith("_") or key not in state:
+                    continue
+                state[key] = value
         return state
 
     def _still_needed_bits(
@@ -770,21 +833,10 @@ class ChannelMuteService:
         channel_id: int,
         user_id: int,
         scope: MuteScope,
+        *,
+        snapshot: dict[str, Any] | None = None,
     ) -> list[BitPair]:
         """Bit pairs to revert for ``scope``, excluding bits other records need."""
         keep = self._still_needed_bits(guild_id, channel_id, user_id, scope)
-        return [pair for pair in scope_bit_pairs(scope) if not (pair[1] & keep)]
-
-    async def _rollback_overwrite(
-        self,
-        guild_id: int,
-        channel: discord.TextChannel,
-        target: discord.Member,
-        snapshot: dict[str, Any] | None,
-        scope: MuteScope,
-    ) -> None:
-        pairs = self._revert_pairs(guild_id, channel.id, target.id, scope)
-        if pairs:
-            await self._overwrite.rollback_after_failed_db(
-                channel, target, snapshot, pairs
-            )
+        pairs = applied_bit_pairs(scope, snapshot)
+        return [pair for pair in pairs if not (pair[1] & keep)]

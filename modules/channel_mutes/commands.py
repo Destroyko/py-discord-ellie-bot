@@ -16,6 +16,7 @@ from core.channel_context import (
     assert_commands_allowed_in_channel,
     is_ephemeral_mute_command_reply,
     is_ephemeral_reply,
+    is_forum_invocation,
     resolve_invocation_channel,
     resolve_mute_target,
 )
@@ -155,7 +156,7 @@ class ChannelMutesCog(commands.Cog):
         user: discord.Member,
         duration: str,
         reason: str | None = None,
-        channel: discord.TextChannel | discord.Thread | None = None,
+        channel: discord.TextChannel | discord.ForumChannel | discord.Thread | None = None,
         scope: str | None = None,
     ) -> None:
         inv_kind = None
@@ -269,7 +270,7 @@ class ChannelMutesCog(commands.Cog):
         self,
         interaction: discord.Interaction,
         user: discord.Member,
-        channel: discord.TextChannel | discord.Thread | None = None,
+        channel: discord.TextChannel | discord.ForumChannel | discord.Thread | None = None,
         scope: str | None = None,
     ) -> None:
         inv_kind = None
@@ -315,9 +316,9 @@ class ChannelMutesCog(commands.Cog):
                 description = f"Запрет снят: {target_member.mention}, {place}"
                 embed_color = discord.Color.green()
             else:
-                scope_filter = (
-                    scope_from_command_value(scope) if scope is not None else None
-                )
+                scope_filter = None
+                if not is_forum_invocation(invocation) and scope is not None:
+                    scope_filter = scope_from_command_value(scope)
                 channel_id_filter = (
                     None
                     if invocation.kind == ChannelKind.MOD_COMMANDS

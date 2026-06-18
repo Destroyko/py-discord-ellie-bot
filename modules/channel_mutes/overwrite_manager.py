@@ -8,25 +8,29 @@ from typing import Any
 import discord
 from discord.abc import _Overwrites
 
+from core.channel_context import MuteChannel
+from core.exceptions import DiscordActionError
 from modules.channel_mutes.mute_scope import MuteScope
 from modules.channel_mutes.permissions_bits import (
+    BitPair,
+    CREATE_PUBLIC_THREADS_BIT,
+    SEND_MESSAGES_IN_THREADS_BIT,
+    applied_bit_pairs,
     capture_state_for_scope,
     compute_reverted_pair,
     deny_flag_value_for_scope,
+    scope_bit_pairs,
 )
 
 logger = logging.getLogger("ellie_bot")
 
-# A (snapshot_key, permission_bit) pair, as produced by permissions_bits.
-BitPair = tuple[str, int]
-
 
 class OverwriteManager:
-    """Apply and revert send-message deny bits for a member in a text channel."""
+    """Apply and revert send-message deny bits for a member in a channel."""
 
     @staticmethod
     def read_scope_state(
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         member: discord.Member | discord.abc.Snowflake,
         scope: MuteScope,
     ) -> dict[str, Any]:
@@ -36,11 +40,21 @@ class OverwriteManager:
 
     async def apply_mute(
         self,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         member: discord.Member,
         scope: MuteScope,
-    ) -> None:
-        """Merge the scope's deny bits into the member overwrite."""
+    ) -> list[BitPair]:
+        """
+        Merge the scope's deny bits into the member overwrite.
+
+        For ``MuteScope.FORUM``, tries both thread bits in one call; on
+        ``HTTPException`` retries with ``send_messages_in_threads`` only.
+
+        :returns: list of (snapshot_key, bit) pairs actually applied.
+        """
+        if scope is MuteScope.FORUM:
+            return await self._apply_forum_mute(channel, member)
+
         current = channel.overwrites_for(member)
         allow, deny = current.pair()
         new_deny = deny.value | deny_flag_value_for_scope(scope)
@@ -49,10 +63,52 @@ class OverwriteManager:
             discord.Permissions(new_deny),
         )
         await channel.set_permissions(member, overwrite=new_overwrite)
+        return list(scope_bit_pairs(scope))
+
+    async def _apply_forum_mute(
+        self,
+        channel: MuteChannel,
+        member: discord.Member,
+    ) -> list[BitPair]:
+        current = channel.overwrites_for(member)
+        allow, deny = current.pair()
+        full_deny = deny.value | SEND_MESSAGES_IN_THREADS_BIT | CREATE_PUBLIC_THREADS_BIT
+        full_overwrite = discord.PermissionOverwrite.from_pair(
+            discord.Permissions(allow.value),
+            discord.Permissions(full_deny),
+        )
+        try:
+            await channel.set_permissions(member, overwrite=full_overwrite)
+            return list(scope_bit_pairs(MuteScope.FORUM))
+        except discord.HTTPException as exc:
+            send_only_deny = deny.value | SEND_MESSAGES_IN_THREADS_BIT
+            send_overwrite = discord.PermissionOverwrite.from_pair(
+                discord.Permissions(allow.value),
+                discord.Permissions(send_only_deny),
+            )
+            try:
+                await channel.set_permissions(member, overwrite=send_overwrite)
+            except discord.HTTPException as send_exc:
+                raise DiscordActionError(
+                    f"Не могу выдать наказание: "
+                    f"{send_exc.text if hasattr(send_exc, 'text') else send_exc}"
+                ) from send_exc
+            logger.warning(
+                "create_public_threads deny failed for user %s in forum %s, "
+                "applied send_messages_in_threads only: %s",
+                member.id,
+                channel.id,
+                exc.text if hasattr(exc, "text") else exc,
+            )
+            return [
+                pair
+                for pair in scope_bit_pairs(MuteScope.FORUM)
+                if pair[1] == SEND_MESSAGES_IN_THREADS_BIT
+            ]
 
     async def revert_mute(
         self,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         member: discord.Member,
         snapshot: dict[str, Any] | None,
         pairs: list[BitPair],
@@ -68,7 +124,7 @@ class OverwriteManager:
 
     async def revert_mute_by_user_id(
         self,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         user_id: int,
         snapshot: dict[str, Any] | None,
         pairs: list[BitPair],
@@ -107,7 +163,7 @@ class OverwriteManager:
 
     async def _apply_channel_permissions(
         self,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         user_id: int,
         *,
         overwrite: discord.PermissionOverwrite | None,
@@ -133,17 +189,27 @@ class OverwriteManager:
 
     async def rollback_after_failed_db(
         self,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         member: discord.Member,
         snapshot: dict[str, Any] | None,
-        pairs: list[BitPair],
+        applied_pairs: list[BitPair],
     ) -> None:
         """Revert Discord state after DB/scheduling failure."""
+        if not applied_pairs:
+            return
         try:
-            await self.revert_mute(channel, member, snapshot, pairs)
+            await self.revert_mute(channel, member, snapshot, applied_pairs)
         except discord.HTTPException:
             logger.exception(
                 "Failed to rollback overwrite for user %s in channel %s",
                 member.id,
                 channel.id,
             )
+
+    def pairs_for_revert(
+        self,
+        scope: MuteScope,
+        snapshot: dict[str, Any] | None,
+    ) -> list[BitPair]:
+        """Resolve which bit pairs to revert for a mute record."""
+        return applied_bit_pairs(scope, snapshot)

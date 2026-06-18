@@ -14,6 +14,8 @@ from modules.channel_mutes.mute_scope import (
     scope_from_command_value,
 )
 
+MuteChannel = discord.TextChannel | discord.ForumChannel
+
 
 class ChannelKind(Enum):
     """Classification of a text channel for command routing."""
@@ -43,14 +45,15 @@ class TargetChannelContext:
 class MuteTarget:
     """Resolved mute application target.
 
-    ``overwrite_channel`` is the text channel whose permission overwrites are
-    edited (the parent channel when a thread was targeted).
+    ``overwrite_channel`` is the channel whose permission overwrites are
+    edited (the parent text/forum channel when a thread was targeted).
     """
 
-    overwrite_channel: discord.TextChannel
+    overwrite_channel: MuteChannel
     scope: MuteScope
     channel_param_required: bool
     target_is_thread: bool
+    is_forum: bool
 
 
 def classify_channel(channel_id: int, config: AppConfig) -> ChannelKind:
@@ -60,6 +63,18 @@ def classify_channel(channel_id: int, config: AppConfig) -> ChannelKind:
     if channel_id == config.moderator_commands_channel_id:
         return ChannelKind.MOD_COMMANDS
     return ChannelKind.PUBLIC
+
+
+def is_forum_thread(channel: discord.Thread) -> bool:
+    """Return True if the thread belongs to a forum channel."""
+    parent = channel.parent
+    return isinstance(parent, discord.ForumChannel)
+
+
+def is_forum_invocation(invocation: InvocationContext) -> bool:
+    """Return True when the command was invoked inside a forum post (ward)."""
+    channel = invocation.channel
+    return isinstance(channel, discord.Thread) and is_forum_thread(channel)
 
 
 def resolve_invocation_channel(
@@ -72,12 +87,19 @@ def resolve_invocation_channel(
     Threads inherit the routing classification of their parent text channel
     for special channels (mod-commands / bot-logs).
 
-    :raises ValidationError: if not a text channel or text thread.
+    Forum channel list view (ForumChannel as interaction.channel) is rejected;
+    forum posts (threads under ForumChannel) are allowed.
+
+    :raises ValidationError: if not a text channel, forum post, or text thread.
     """
     channel = interaction.channel
-    if interaction.guild is None or not isinstance(
-        channel, (discord.TextChannel, discord.Thread)
-    ):
+    if interaction.guild is None:
+        raise ValidationError("Команда доступна только в текстовых каналах и ветках.")
+
+    if isinstance(channel, discord.ForumChannel):
+        raise ValidationError("Команда доступна только в текстовых каналах и ветках.")
+
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         raise ValidationError("Команда доступна только в текстовых каналах и ветках.")
 
     classify_id = channel.id
@@ -107,19 +129,18 @@ def assert_commands_allowed_in_channel(kind: ChannelKind, *, for_help: bool = Fa
 
 def resolve_mute_target(
     invocation: InvocationContext,
-    channel_param: discord.TextChannel | discord.Thread | None,
+    channel_param: discord.TextChannel | discord.ForumChannel | discord.Thread | None,
     scope_value: str | None,
     config: AppConfig,
 ) -> MuteTarget:
     """
     Resolve where mute/unmute applies and with which :class:`MuteScope`.
 
-    Thread targets edit the parent text channel's overwrites. The default
-    scope, when not given, is ``chat`` for text channels and ``threads`` for
-    thread targets.
+    Thread targets edit the parent channel's overwrites. Forum threads and
+    forum channels always use ``MuteScope.FORUM``; the ``scope`` param is
+    ignored for forum targets.
 
-    :raises ValidationError: on missing required param, forbidden target,
-        forum threads, or an invalid scope/target combination.
+    :raises ValidationError: on missing required param or forbidden target.
     """
     if invocation.kind == ChannelKind.MOD_COMMANDS:
         if channel_param is None:
@@ -132,17 +153,28 @@ def resolve_mute_target(
         target = channel_param or invocation.channel
         required = False
 
-    if not isinstance(target, (discord.TextChannel, discord.Thread)):
-        raise ValidationError("Команда доступна только в текстовых каналах и ветках.")
+    if not isinstance(
+        target, (discord.TextChannel, discord.ForumChannel, discord.Thread)
+    ):
+        raise ValidationError(
+            "Команда доступна только в текстовых каналах, форумах и ветках."
+        )
 
     target_is_thread = isinstance(target, discord.Thread)
+    is_forum = False
+
     if target_is_thread:
         parent = target.parent
-        if not isinstance(parent, discord.TextChannel):
-            raise ValidationError(
-                "Наказание поддерживается только в текстовых ветках (форумы не поддерживаются)."
-            )
-        overwrite_channel = parent
+        if isinstance(parent, discord.ForumChannel):
+            overwrite_channel = parent
+            is_forum = True
+        elif isinstance(parent, discord.TextChannel):
+            overwrite_channel = parent
+        else:
+            raise ValidationError("Не удалось определить родительский канал ветки.")
+    elif isinstance(target, discord.ForumChannel):
+        overwrite_channel = target
+        is_forum = True
     else:
         overwrite_channel = target
 
@@ -150,13 +182,17 @@ def resolve_mute_target(
     if target_kind in (ChannelKind.MOD_COMMANDS, ChannelKind.BOT_LOGS):
         raise ValidationError("Нельзя выдать наказание в этот канал.")
 
-    scope = _resolve_scope(scope_value, target_is_thread)
+    if is_forum:
+        scope = MuteScope.FORUM
+    else:
+        scope = _resolve_scope(scope_value, target_is_thread)
 
     return MuteTarget(
         overwrite_channel=overwrite_channel,
         scope=scope,
         channel_param_required=required,
         target_is_thread=target_is_thread,
+        is_forum=is_forum,
     )
 
 

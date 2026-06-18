@@ -140,4 +140,6 @@ def _scope_aspect(scope: MuteScope) -> str:
         return "в чате"
     if scope is MuteScope.THREADS_ONLY:
         return "в ветках"
+    if scope is MuteScope.FORUM:
+        return "во всех палатах форума"
     return "в чате и ветках"

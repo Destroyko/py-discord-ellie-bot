@@ -104,6 +104,24 @@ class ChannelMuteRepository:
         conn.commit()
         return self.get_by_id(mute_id)
 
+    def update_snapshot(
+        self,
+        mute_id: int,
+        overwrite_snapshot: dict[str, Any],
+    ) -> ChannelMute | None:
+        """Update overwrite snapshot (e.g. after best-effort create bit on extend)."""
+        conn = self._db.connect()
+        conn.execute(
+            """
+            UPDATE channel_mutes
+            SET overwrite_snapshot = ?
+            WHERE id = ?
+            """,
+            (json.dumps(overwrite_snapshot), mute_id),
+        )
+        conn.commit()
+        return self.get_by_id(mute_id)
+
     def delete(self, mute_id: int) -> None:
         """Remove a mute record by primary key."""
         conn = self._db.connect()

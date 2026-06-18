@@ -6,6 +6,7 @@ import logging
 
 import discord
 
+from core.channel_context import MuteChannel
 from core.config_loader import AppConfig
 from modules.channel_mutes.mute_scope import MuteScope, scope_place_phrase
 
@@ -24,7 +25,7 @@ class ModeratorNotifier:
         *,
         moderator: discord.Member,
         target: discord.Member,
-        channel: discord.TextChannel,
+        channel: MuteChannel,
         duration_text: str,
         reason: str | None,
         previous_duration_text: str | None = None,
