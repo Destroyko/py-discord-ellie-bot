@@ -63,7 +63,10 @@ def notification_scope_for_channel(removed_scopes: set[MuteScope]) -> MuteScope:
     Pick DM/mod-notice scope text for what was removed on one channel.
 
     Combined «чат и ветки» only when both aspects were cleared in this operation.
+    Forum mutes keep ``FORUM`` phrasing (not «ветки чата»).
     """
+    if MuteScope.FORUM in removed_scopes:
+        return MuteScope.FORUM
     chat_removed = any(scope.affects_chat for scope in removed_scopes)
     threads_removed = any(scope.affects_threads for scope in removed_scopes)
     if chat_removed and threads_removed:

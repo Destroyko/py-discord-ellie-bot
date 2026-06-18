@@ -78,3 +78,9 @@ class TestNotificationScopeForChannel:
             notification_scope_for_channel({MuteScope.CHAT_AND_THREADS})
             is MuteScope.CHAT_AND_THREADS
         )
+
+    def test_forum_keeps_forum_phrasing(self) -> None:
+        assert (
+            notification_scope_for_channel({MuteScope.FORUM})
+            is MuteScope.FORUM
+        )
