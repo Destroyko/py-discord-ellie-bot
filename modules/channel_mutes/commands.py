@@ -37,7 +37,7 @@ from core.responses import (
     reply_wrong_guild,
 )
 from modules.channel_mutes.duration import parse_duration
-from modules.channel_mutes.help_text import HELP_MESSAGE
+from modules.channel_mutes.help_text import build_help_embed
 from modules.channel_mutes.mute_scope import (
     COMMAND_SCOPE_ALL,
     COMMAND_SCOPE_CHAT,
@@ -476,14 +476,16 @@ class ChannelMutesCog(commands.Cog):
             inv_kind = invocation.kind
             assert_commands_allowed_in_channel(invocation.kind, for_help=True)
 
-            await reply_moderator(
-                interaction,
-                HELP_MESSAGE,
-                config=self.config,
-                invocation_kind=invocation.kind,
-                success=True,
-                ephemeral=True,
-            )
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    embed=build_help_embed(),
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    embed=build_help_embed(),
+                    ephemeral=True,
+                )
         except ValidationError as exc:
             if inv_kind is not None:
                 await reply_validation(
