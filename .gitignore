@@ -1,6 +1,7 @@
 .env
 config/config.yaml
 config/roles.yaml
+config/media_cleanup.yaml
 __pycache__/
 *.py[cod]
 *.db

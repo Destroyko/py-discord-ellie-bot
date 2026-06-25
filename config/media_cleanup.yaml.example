@@ -1,0 +1,9 @@
+# Auto-delete text messages in media channels after discussion goes idle.
+# Copy to config/media_cleanup.yaml and set channel_ids.
+
+enabled: true
+channel_ids:
+  - 123456789012345678
+idle_threshold_minutes: 30
+purge_limit: 10000
+text_search_limit: 1000

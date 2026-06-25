@@ -12,8 +12,11 @@ from discord.ext import commands
 from core.config_loader import AppConfig, load_config
 from core.exceptions import ConfigError
 from core.logger import setup_logging
+from core.startup_checks import run_startup_checks
 from database.database import Database
 from modules.channel_mutes.commands import setup_channel_mutes_cog
+from modules.media_cleanup import setup_media_cleanup_cog
+from modules.media_cleanup.config import MediaCleanupConfig, load_media_cleanup_config
 from modules.mention_gif import setup_mention_gif_cog
 from modules.channel_mutes.repository import ChannelMuteRepository
 from modules.channel_mutes.scheduler import MuteScheduler
@@ -25,18 +28,25 @@ logger = logging.getLogger("ellie_bot")
 class EllieBot(commands.Bot):
     """Discord bot bound to a single configured guild."""
 
-    def __init__(self, config: AppConfig, database: Database) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        database: Database,
+        media_cleanup_config: MediaCleanupConfig,
+    ) -> None:
         intents = discord.Intents.default()
         intents.members = True
         intents.message_content = False
         super().__init__(command_prefix=config.prefix, intents=intents)
         self.app_config = config
         self.database = database
+        self.media_cleanup_config = media_cleanup_config
         self.mute_repository = ChannelMuteRepository(database)
         self.mute_service = ChannelMuteService(self, config, self.mute_repository)
         self.mute_scheduler = MuteScheduler(self.mute_service, self.mute_repository)
         self._scheduler_wired = False
         self._mutes_restored = False
+        self._startup_checks_done = False
 
     def _wire_scheduler(self) -> None:
         if self._scheduler_wired:
@@ -61,6 +71,11 @@ class EllieBot(commands.Bot):
             self.mute_repository,
         )
         await setup_mention_gif_cog(self, self.app_config, self.database)
+        await setup_media_cleanup_cog(
+            self,
+            self.app_config,
+            self.media_cleanup_config,
+        )
 
         guild = discord.Object(id=self.app_config.guild_id)
         self.tree.copy_global_to(guild=guild)
@@ -94,11 +109,16 @@ class EllieBot(commands.Bot):
             self._mutes_restored = True
             logger.info("Mute scheduler restored for guild %s", guild.id)
 
+        if not self._startup_checks_done:
+            await run_startup_checks(guild, self.app_config, self.media_cleanup_config)
+            self._startup_checks_done = True
+
 
 async def main() -> None:
     """Load config, initialize database, and run the bot."""
     try:
         config = load_config()
+        media_cleanup_config = load_media_cleanup_config()
     except ConfigError as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -110,7 +130,7 @@ async def main() -> None:
     database.init_db()
     logger.info("Database initialized at %s", config.database_path)
 
-    bot = EllieBot(config, database)
+    bot = EllieBot(config, database, media_cleanup_config)
 
     try:
         await bot.start(config.discord_token)
